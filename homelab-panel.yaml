@@ -1,0 +1,248 @@
+# =============================================================================
+# Homelab status panel for the ESP32-2432S028R ("Cheap Yellow Display")
+#
+# Polls the FastAPI aggregator and renders cluster / pool / PBS health with
+# LVGL. RGB LED goes red on any alert; backlight auto-dims from the LDR.
+#
+# BEFORE FLASHING:
+#   1. Run `esphome config homelab-panel.yaml` to validate. The LVGL block is
+#      the most likely place for a version-sensitive syntax tweak.
+#   2. Confirm your board variant. Most 2432S028R units are ILI9341 (set below).
+#      Some later runs ship an ST7789 panel and/or swap the USB chip and a few
+#      pins. If the screen is blank/garbled, that's the first thing to check.
+#   3. Set the secrets below (wifi + aggregator URL).
+# =============================================================================
+
+substitutions:
+  name: homelab-panel
+  agg_url: "http://10.0.0.40:8000/api/status"   # <-- your aggregator host:port
+  poll_interval: "15s"
+
+esphome:
+  name: ${name}
+  friendly_name: Homelab Panel
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino   # http_request + lvgl is most battle-tested on arduino here
+
+logger:
+  level: INFO
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# --- networking for the aggregator poll -------------------------------------
+http_request:
+  useragent: esphome/cyd-panel
+  timeout: 6s
+  verify_ssl: false   # aggregator is plain HTTP on the LAN; harmless either way
+
+json:
+
+globals:
+  - id: g_alert
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+# --- two SPI buses: display and touch are separate on this board ------------
+spi:
+  - id: tft
+    clk_pin: 14
+    mosi_pin: 13
+    miso_pin: 12
+  - id: touchbus
+    clk_pin: 25
+    mosi_pin: 32
+    miso_pin: 39
+
+# --- backlight (PWM) + LDR auto-dim -----------------------------------------
+output:
+  - platform: ledc
+    pin: 21
+    id: backlight
+    frequency: 1000Hz
+  # RGB LED is common-anode / active LOW on the CYD, so invert each channel.
+  - platform: gpio
+    pin: 4
+    id: led_r
+    inverted: true
+  - platform: gpio
+    pin: 16
+    id: led_g
+    inverted: true
+  - platform: gpio
+    pin: 17
+    id: led_b
+    inverted: true
+
+sensor:
+  - platform: adc
+    pin: 34          # LDR / light sensor
+    name: "Ambient light"
+    id: ldr
+    update_interval: 5s
+    attenuation: 12db
+    filters:
+      - sliding_window_moving_average:
+          window_size: 4
+          send_every: 4
+    on_value:
+      then:
+        - lambda: |-
+            // Higher voltage = darker on this board. Map to a sane range.
+            float level = 1.0f - (x / 3.1f);
+            if (level < 0.15f) level = 0.15f;   // never fully off
+            if (level > 1.0f) level = 1.0f;
+            id(backlight).set_level(level);
+
+display:
+  - platform: ili9xxx
+    model: ILI9341          # <-- change to ST7789V if you have that variant
+    spi_id: tft
+    cs_pin: 15
+    dc_pin: 2
+    rotation: 270           # landscape, 320x240
+    auto_clear_enabled: false
+    update_interval: never  # LVGL drives the display
+
+touchscreen:
+  - platform: xpt2046
+    id: touch
+    spi_id: touchbus
+    cs_pin: 33
+    interrupt_pin: 36
+    update_interval: 50ms
+    # Calibration values are board-specific; tweak after a first flash.
+    calibration:
+      x_min: 280
+      x_max: 3860
+      y_min: 340
+      y_max: 3860
+    transform:
+      swap_xy: true
+
+# --- the dashboard ----------------------------------------------------------
+lvgl:
+  displays:
+    - display_id: null
+  disp_bg_color: 0x101418
+  default_font: montserrat_14
+  pages:
+    - id: main_page
+      widgets:
+        # header
+        - label:
+            id: hdr
+            x: 4
+            y: 2
+            text: "HOMELAB   connecting..."
+            text_color: 0xE6E6E6
+        # node rows (5 fixed slots, updated by index)
+        - label: { id: n0, x: 8, y: 28, text: "", text_color: 0xCFE8CF }
+        - label: { id: n1, x: 8, y: 46, text: "", text_color: 0xCFE8CF }
+        - label: { id: n2, x: 8, y: 64, text: "", text_color: 0xCFE8CF }
+        - label: { id: n3, x: 8, y: 82, text: "", text_color: 0xCFE8CF }
+        - label: { id: n4, x: 8, y: 100, text: "", text_color: 0xCFE8CF }
+        # pool bars (4 slots): label above a thin bar
+        - label: { id: p0l, x: 8, y: 124, text: "", text_color: 0xBFD7EA }
+        - bar:   { id: p0b, x: 8, y: 140, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: p1l, x: 8, y: 152, text: "", text_color: 0xBFD7EA }
+        - bar:   { id: p1b, x: 8, y: 168, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: p2l, x: 8, y: 180, text: "", text_color: 0xBFD7EA }
+        - bar:   { id: p2b, x: 8, y: 196, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: p3l, x: 8, y: 208, text: "", text_color: 0xBFD7EA }
+        - bar:   { id: p3b, x: 8, y: 224, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+# --- poll + parse + render --------------------------------------------------
+interval:
+  - interval: ${poll_interval}
+    then:
+      - http_request.get:
+          url: ${agg_url}
+          capture_response: true
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) {
+                    lv_label_set_text(id(hdr), "HOMELAB   aggregator unreachable");
+                    lv_obj_set_style_text_color(id(hdr), lv_color_hex(0xFF5555), 0);
+                    id(g_alert) = true;
+                    return;
+                  }
+                  json::parse_json(body, [](JsonObjectConst root) -> bool {
+                    char buf[40];
+
+                    // header: quorum + alert
+                    bool quorate = root["quorate"] | false;
+                    bool alert = root["alert"] | false;
+                    id(g_alert) = alert;
+                    snprintf(buf, sizeof(buf), "HOMELAB   quorum:%s%s",
+                             quorate ? "OK" : "LOST",
+                             alert ? "   ALERT" : "");
+                    lv_label_set_text(id(hdr), buf);
+                    lv_obj_set_style_text_color(id(hdr),
+                        alert ? lv_color_hex(0xFFB000) : lv_color_hex(0xE6E6E6), 0);
+
+                    // nodes
+                    lv_obj_t* nlbl[5] = { id(n0), id(n1), id(n2), id(n3), id(n4) };
+                    JsonArrayConst nodes = root["nodes"];
+                    for (int i = 0; i < 5; i++) {
+                      if (i < (int) nodes.size()) {
+                        const char* nm = nodes[i]["name"] | "?";
+                        bool up = nodes[i]["up"] | false;
+                        int cpu = nodes[i]["cpu"] | 0;
+                        int mem = nodes[i]["mem"] | 0;
+                        if (up) snprintf(buf, sizeof(buf), "%-9s cpu %2d%%  mem %2d%%", nm, cpu, mem);
+                        else    snprintf(buf, sizeof(buf), "%-9s  ** DOWN **", nm);
+                        lv_label_set_text(nlbl[i], buf);
+                        lv_obj_set_style_text_color(nlbl[i],
+                            up ? lv_color_hex(0xCFE8CF) : lv_color_hex(0xFF5555), 0);
+                      } else {
+                        lv_label_set_text(nlbl[i], "");
+                      }
+                    }
+
+                    // pools
+                    lv_obj_t* plbl[4] = { id(p0l), id(p1l), id(p2l), id(p3l) };
+                    lv_obj_t* pbar[4] = { id(p0b), id(p1b), id(p2b), id(p3b) };
+                    JsonArrayConst pools = root["pools"];
+                    for (int i = 0; i < 4; i++) {
+                      if (i < (int) pools.size()) {
+                        const char* nm = pools[i]["name"] | "?";
+                        const char* hl = pools[i]["health"] | "?";
+                        bool ok = pools[i]["ok"] | false;
+                        int used = pools[i]["used"] | 0;
+                        snprintf(buf, sizeof(buf), "%-12s %s  %d%%", nm, hl, used);
+                        lv_label_set_text(plbl[i], buf);
+                        lv_bar_set_value(pbar[i], used, LV_ANIM_OFF);
+                        uint32_t c = 0x4CAF50;            // green
+                        if (!ok) c = 0xFF5555;            // degraded/unhealthy
+                        else if (used >= 85) c = 0xFFB000; // near full
+                        lv_obj_set_style_bg_color(pbar[i], lv_color_hex(c), LV_PART_INDICATOR);
+                      } else {
+                        lv_label_set_text(plbl[i], "");
+                        lv_bar_set_value(pbar[i], 0, LV_ANIM_OFF);
+                      }
+                    }
+                    return true;
+                  });
+      # drive the RGB LED from the alert flag (red on alert, dim green otherwise)
+      - if:
+          condition:
+            lambda: "return id(g_alert);"
+          then:
+            - output.turn_on: led_r
+            - output.turn_off: led_g
+            - output.turn_off: led_b
+          else:
+            - output.turn_off: led_r
+            - output.turn_off: led_g   # leave green off too for a dark idle; flip to turn_on if you want a green "all good" light
+            - output.turn_off: led_b

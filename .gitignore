@@ -1,0 +1,18 @@
+# secrets / local config (never commit)
+.env
+.env.*
+!.env.example
+secrets.yaml
+!secrets.yaml.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# esphome build artifacts
+.esphome/
+
+# macOS
+.DS_Store
