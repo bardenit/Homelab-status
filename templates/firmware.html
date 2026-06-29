@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Firmware / OTA{% endblock %}
+{% block body %}
+<div class="topbar">
+  <h1>Firmware / OTA</h1>
+  <form class="inline" method="post" action="/admin/logout">
+    <button class="secondary" type="submit" style="margin-top:0;">Log out</button>
+  </form>
+</div>
+<p class="muted"><a href="/admin" style="color:#7e8a97;">&larr; Configuration</a></p>
+
+{% if uploaded %}<div class="banner ok">Firmware uploaded. Panels will pull it on their next check.</div>{% endif %}
+{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+
+<h2>Current firmware</h2>
+{% if meta %}
+  <p>
+    Version <strong>{{ meta.version }}</strong>
+    {% if meta.summary %}<br><span class="muted">{{ meta.summary }}</span>{% endif %}
+    <br><span class="muted">md5 {{ meta.md5 }} &middot; {{ '%.1f'|format(meta.size / 1024) }} KB</span>
+  </p>
+{% else %}
+  <p class="muted">No firmware uploaded yet.</p>
+{% endif %}
+
+<h2>Upload</h2>
+<p class="muted">Upload the ESPHome <strong>OTA</strong> binary (the <code>.ota.bin</code> build, not the factory <code>.bin</code>).</p>
+<form method="post" action="/admin/firmware" enctype="multipart/form-data">
+  <label for="version">Version (e.g. 2026.6.1 or a build number)</label>
+  <input type="text" id="version" name="version" required>
+  <label for="summary">Notes (optional)</label>
+  <input type="text" id="summary" name="summary">
+  <label for="file">Firmware file (.ota.bin)</label>
+  <input type="file" id="file" name="file" accept=".bin" required>
+  <button type="submit">Upload firmware</button>
+</form>
+
+<h2>Manifest URL (for the panel YAML)</h2>
+<p class="muted">Point the panel's <code>update: platform: http_request</code> at:</p>
+<input type="text" readonly value="{{ manifest_url }}" onclick="this.select()">
+
+<h2>Panels</h2>
+{% if devices %}
+  <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+    <tr style="text-align:left; color:#7e8a97;">
+      <th style="padding:0.3rem 0;">Panel</th><th>Firmware</th><th>IP</th><th>Last seen</th>
+    </tr>
+    {% for pid, d in devices.items() %}
+    <tr style="border-top:1px solid #232b34;">
+      <td style="padding:0.4rem 0;">{{ pid }}</td>
+      <td>
+        {{ d.version }}
+        {% if meta and d.version == meta.version %}<span style="color:#7ee2ad;"> &check; current</span>
+        {% elif meta %}<span style="color:#f0c04a;"> &middot; update available</span>{% endif %}
+      </td>
+      <td>{{ d.ip }}</td>
+      <td>{{ d.last_seen }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Last seen is a Unix timestamp; panels report once the Phase 3 firmware is flashed.</p>
+{% else %}
+  <p class="muted">No panels have checked in yet.</p>
+{% endif %}
+{% endblock %}

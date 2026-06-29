@@ -7,7 +7,10 @@ services:
     env_file:
       - ./.env
     ports:
-      - "8000:8000"
+      - "80:8000"
+    volumes:
+      # persists /data/config.json (hosts, tokens, admin password) across recreation
+      - ./data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
       interval: 30s

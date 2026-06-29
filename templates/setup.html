@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Set admin password{% endblock %}
+{% block body %}
+<h1>Welcome, set an admin password</h1>
+<p class="muted">This protects your homelab tokens and (later) the firmware update controls. Minimum 8 characters.</p>
+{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+<form method="post" action="/admin/setup">
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="new-password" required>
+  <label for="confirm">Confirm password</label>
+  <input type="password" id="confirm" name="confirm" autocomplete="new-password" required>
+  <button type="submit">Set password</button>
+</form>
+{% endblock %}

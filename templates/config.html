@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Configuration{% endblock %}
+{% block body %}
+<div class="topbar">
+  <h1>Configuration</h1>
+  <form class="inline" method="post" action="/admin/logout">
+    <button class="secondary" type="submit" style="margin-top:0;">Log out</button>
+  </form>
+</div>
+{% if saved %}<div class="banner ok">Saved. New settings take effect on the next poll.</div>{% endif %}
+<form method="post" action="/admin/config">
+
+  <h2>Mode</h2>
+  <div class="check">
+    <input type="checkbox" id="mock" name="mock" {% if cfg.mock %}checked{% endif %}>
+    <label for="mock">Mock mode (serve fake data, ignore the backends below)</label>
+  </div>
+
+  <h2>Proxmox VE</h2>
+  <label for="pve_host">Host (e.g. 10.0.0.10:8006)</label>
+  <input type="text" id="pve_host" name="pve_host" value="{{ cfg.pve_host }}">
+  <label for="pve_token_id">Token ID (e.g. jason@pam!LabMonitor)</label>
+  <input type="text" id="pve_token_id" name="pve_token_id" value="{{ cfg.pve_token_id }}">
+  <label for="pve_secret">Secret (the UUID)</label>
+  <input type="password" id="pve_secret" name="pve_secret" value="{{ cfg.pve_secret }}">
+  <div><button type="button" class="secondary test-btn" data-target="pve">Test connection</button><span class="test-result" id="result-pve"></span></div>
+
+  <h2>TrueNAS</h2>
+  <label for="truenas_host">Host (e.g. 10.0.0.20)</label>
+  <input type="text" id="truenas_host" name="truenas_host" value="{{ cfg.truenas_host }}">
+  <label for="truenas_key">API key</label>
+  <input type="password" id="truenas_key" name="truenas_key" value="{{ cfg.truenas_key }}">
+  <div><button type="button" class="secondary test-btn" data-target="truenas">Test connection</button><span class="test-result" id="result-truenas"></span></div>
+
+  <h2>Proxmox Backup Server</h2>
+  <label for="pbs_host">Host (e.g. 10.0.0.30:8007)</label>
+  <input type="text" id="pbs_host" name="pbs_host" value="{{ cfg.pbs_host }}">
+  <label for="pbs_token_id">Token ID (e.g. backup@pbs!monitor)</label>
+  <input type="text" id="pbs_token_id" name="pbs_token_id" value="{{ cfg.pbs_token_id }}">
+  <label for="pbs_secret">Secret</label>
+  <input type="password" id="pbs_secret" name="pbs_secret" value="{{ cfg.pbs_secret }}">
+  <label for="pbs_node">Node name (for the GC task-log path)</label>
+  <input type="text" id="pbs_node" name="pbs_node" value="{{ cfg.pbs_node }}">
+  <div><button type="button" class="secondary test-btn" data-target="pbs">Test connection</button><span class="test-result" id="result-pbs"></span></div>
+
+  <h2>Alert thresholds (%)</h2>
+  <div class="row">
+    <div><label for="mem_warn">Node memory</label><input type="number" step="1" id="mem_warn" name="mem_warn" value="{{ cfg.mem_warn }}"></div>
+    <div><label for="pool_warn">Pool usage</label><input type="number" step="1" id="pool_warn" name="pool_warn" value="{{ cfg.pool_warn }}"></div>
+    <div><label for="pbs_warn">PBS usage</label><input type="number" step="1" id="pbs_warn" name="pbs_warn" value="{{ cfg.pbs_warn }}"></div>
+  </div>
+
+  <h2>Tuning</h2>
+  <div class="row">
+    <div><label for="cache_ttl">Cache TTL (s)</label><input type="number" step="1" id="cache_ttl" name="cache_ttl" value="{{ cfg.cache_ttl }}"></div>
+    <div><label for="http_timeout">HTTP timeout (s)</label><input type="number" step="1" id="http_timeout" name="http_timeout" value="{{ cfg.http_timeout }}"></div>
+  </div>
+
+  <h2>Firmware / OTA</h2>
+  <p class="muted"><a href="/admin/firmware" style="color:#5a9bf0;">Manage firmware and panel updates &rarr;</a></p>
+
+  <button type="submit">Save configuration</button>
+</form>
+
+<script>
+  // Each Test button probes the values currently typed in the form (not the
+  // saved config), so you can verify creds before committing them.
+  const TEST_FIELDS = {
+    pve:     ["pve_host", "pve_token_id", "pve_secret"],
+    truenas: ["truenas_host", "truenas_key"],
+    pbs:     ["pbs_host", "pbs_token_id", "pbs_secret", "pbs_node"],
+  };
+  document.querySelectorAll(".test-btn").forEach(function (btn) {
+    btn.addEventListener("click", async function () {
+      const target = btn.dataset.target;
+      const out = document.getElementById("result-" + target);
+      out.textContent = "testing…";
+      out.style.color = "#7e8a97";
+      const fd = new FormData();
+      TEST_FIELDS[target].forEach(function (name) {
+        const el = document.querySelector('[name="' + name + '"]');
+        if (el) fd.append(name, el.value);
+      });
+      try {
+        const r = await fetch("/admin/test/" + target, { method: "POST", body: fd });
+        const j = await r.json();
+        out.textContent = (j.ok ? "✓ " : "✗ ") + j.detail;
+        out.style.color = j.ok ? "#7ee2ad" : "#f0a89a";
+      } catch (e) {
+        out.textContent = "✗ request failed: " + e;
+        out.style.color = "#f0a89a";
+      }
+    });
+  });
+</script>
+{% endblock %}

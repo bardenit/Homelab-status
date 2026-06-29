@@ -14,5 +14,11 @@ venv/
 # esphome build artifacts
 .esphome/
 
+# device flash backups (large binaries, keep local only)
+firmware-backups/
+
+# persisted admin config (contains real hosts/tokens/password hash)
+data/
+
 # macOS
 .DS_Store

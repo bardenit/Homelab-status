@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Homelab Panel{% endblock %}</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background:#11151a; color:#e7edf3; margin:0; padding:2rem; }
+  .wrap { max-width: 640px; margin: 0 auto; }
+  h1 { font-size:1.3rem; margin:0 0 1rem; }
+  h2 { font-size:0.78rem; text-transform:uppercase; letter-spacing:0.05em; color:#7e8a97;
+       margin:1.6rem 0 0.5rem; border-bottom:1px solid #232b34; padding-bottom:0.3rem; }
+  label { display:block; margin:0.6rem 0 0.2rem; font-size:0.85rem; color:#aeb8c2; }
+  input[type=text], input[type=password], input[type=number] {
+    width:100%; box-sizing:border-box; padding:0.5rem 0.6rem; background:#1a2027;
+    border:1px solid #2c3540; border-radius:6px; color:#e7edf3; font-size:0.9rem; }
+  input:focus { outline:none; border-color:#3b82f6; }
+  .row { display:flex; gap:1rem; }
+  .row > div { flex:1; }
+  .check { display:flex; align-items:center; gap:0.5rem; margin:0.8rem 0; }
+  .check label { margin:0; }
+  button { margin-top:1.5rem; padding:0.6rem 1.2rem; background:#2563eb; color:#fff;
+    border:none; border-radius:6px; font-size:0.9rem; cursor:pointer; }
+  button:hover { background:#1d4ed8; }
+  button.secondary { background:#2c3540; }
+  .banner { padding:0.6rem 0.8rem; border-radius:6px; margin-bottom:1rem; font-size:0.85rem; }
+  .banner.ok { background:#0f3a25; color:#7ee2ad; }
+  .banner.err { background:#3a160f; color:#f0a89a; }
+  .muted { color:#7e8a97; font-size:0.8rem; }
+  .test-btn { margin-top:0.8rem; padding:0.4rem 0.9rem; font-size:0.8rem; }
+  .test-result { margin-left:0.7rem; font-size:0.82rem; }
+  form.inline { display:inline; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+{% block body %}{% endblock %}
+</div>
+</body>
+</html>

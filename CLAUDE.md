@@ -18,10 +18,13 @@ sees the small pre-digested payload.
 
 ```
 aggregator/
-  app.py                FastAPI service (async httpx, TTL cache, MOCK mode)
+  app.py                FastAPI service (async httpx, TTL cache, mock mode)
+  config.py             runtime config: /data/config.json overlays env vars
+  admin.py              /admin web UI: first-run password, login, config form
+  templates/            Jinja templates for the admin UI
   requirements.txt
   Dockerfile
-  .env.example          all config is env vars; no secrets in code
+  .env                  seeds defaults on first run; admin UI owns config after
 esphome/
   homelab-panel.yaml    CYD firmware (two SPI buses, LVGL, LDR dim, RGB LED)
   secrets.yaml.example  wifi creds
@@ -39,6 +42,13 @@ curl http://localhost:8000/api/status
 ```
 Set `MOCK=1` in `.env` to serve realistic fake data (down node, degraded pool,
 near-full pool) with no backends, for testing the display end to end.
+
+Config after first run: open `http://localhost:8000/admin`, set an admin
+password (first visit only), then enter hosts/tokens in the form. These persist
+to `/data/config.json` (a mounted volume) and take effect on the next poll, no
+restart. The `.env` values only seed the initial form; the JSON file wins once
+it exists. `/api/status` and `/healthz` stay public (the CYD cannot log in);
+everything under `/admin` is password-gated.
 
 Firmware:
 ```bash
@@ -62,6 +72,11 @@ run `esphome config` to validate, since that syntax shifts across versions.
   ESP32 trivial; do the math in Python.
 - The endpoint is TTL-cached (`CACHE_TTL`). Keep it that way so the panel can
   poll freely.
+- Config now persists to `/data/config.json` via the admin UI (env vars only
+  seed defaults). This is the one writable-state exception: it holds real
+  hosts/tokens plus the admin password hash, so `data/` is gitignored, the
+  volume is the only place secrets live at rest, and `/admin` must stay
+  password-gated. Do not log or echo token fields.
 - My personal style: no em dashes in anything you write. Use commas, colons, or
   parentheses.
 

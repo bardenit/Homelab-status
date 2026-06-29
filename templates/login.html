@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Log in{% endblock %}
+{% block body %}
+<h1>Homelab Panel admin</h1>
+{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+<form method="post" action="/admin/login">
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="current-password" required>
+  <button type="submit">Log in</button>
+</form>
+{% endblock %}
