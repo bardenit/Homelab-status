@@ -1,10 +1,11 @@
 services:
   homelab-panel-aggregator:
-    build: ./aggregator
+    build: .
+    image: jbarden75/lab_health
     container_name: homelab-panel-aggregator
     restart: unless-stopped
     env_file:
-      - ./aggregator/.env
+      - ./.env
     ports:
       - "8000:8000"
     healthcheck:
