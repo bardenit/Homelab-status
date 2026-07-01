@@ -29,14 +29,25 @@ def _row(label: str, value: str = "", state: str = "ok", drill: str | None = Non
     return r
 
 
-def _screen(title: str, rows: list, path: str = "", parent: str | None = None) -> dict:
-    return {"title": title, "path": path, "parent": parent, "rows": rows}
+def _screen(title: str, rows: list, path: str = "", parent: str | None = None,
+            layout: str = "cards") -> dict:
+    # layout: "cards" (ring/value grid, drillable) or "list" (label:value detail)
+    return {"title": title, "path": path, "parent": parent, "layout": layout, "rows": rows}
 
 
 def _pct(used: float, total: float) -> int:
     if not total:
         return 0
     return max(0, min(100, round(used / total * 100)))
+
+
+def _bytes(n) -> str:
+    n = float(n or 0)
+    for u in ("B", "K", "M", "G", "T"):
+        if n < 1024 or u == "T":
+            return f"{n:.0f}{u}" if u in ("B", "K", "M") else f"{n:.1f}{u}"
+        n /= 1024
+    return f"{n:.1f}T"
 
 
 # --- PVE helpers ------------------------------------------------------------
@@ -134,12 +145,14 @@ async def _pve(client, cfg, sub, path) -> dict:
             _row("Status", g.get("status", "?"), "ok" if running else "muted"),
             _row("Node", g.get("node", "?"), "muted"),
             _row("CPU", f"{cpu}%", "warn" if cpu >= 85 else "ok"),
-            _row("Memory", f"{memp}%", "warn" if memp >= 85 else "ok"),
-            _row("Disk", f"{diskp}%", "warn" if diskp >= 90 else "ok"),
+            _row("Memory", f"{memp}%  {_bytes(g.get('mem', 0))}/{_bytes(g.get('maxmem', 0))}",
+                 "warn" if memp >= 85 else "ok"),
+            _row("Disk", f"{diskp}%  {_bytes(g.get('disk', 0))}/{_bytes(g.get('maxdisk', 0))}",
+                 "warn" if diskp >= 90 else "ok"),
             _row("Uptime", _dur(int(g.get("uptime", 0))), "muted"),
         ]
         name = f"{g.get('vmid')} {g.get('name', '')}".strip()
-        return _screen(name, rows, path, parent=f"pve/node/{g.get('node')}")
+        return _screen(name, rows, path, parent=f"pve/node/{g.get('node')}", layout="list")
 
     return _screen("CLUSTER", [_row("Unknown path", state="crit")], path, parent="")
 
