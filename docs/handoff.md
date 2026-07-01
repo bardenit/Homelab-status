@@ -2,6 +2,21 @@
 
 Running notes; newest first. Pick up cold from the top.
 
+## 2026-07-01 (later)
+
+- **Gauge dashboard**: Pools/Backups are 2x2 cards with round `arc` gauges (used
+  %, colored by status); Cluster is 5 cards with **concentric rings** (CPU cyan
+  outer, MEM orange inner). Arc thickness must be set on BOTH `LV_PART_MAIN` and
+  `LV_PART_INDICATOR` (top-level `arc_width` only styles the track). Fits RAM
+  fine on the no-PSRAM board (0 LVGL alloc errors).
+- **Fixed the ~15-min reboots**: cause was `api:` default `reboot_timeout` (15m)
+  with no HA client ever connecting → set `reboot_timeout: 0s`. Diagnosed via the
+  new `debug` component (reset reason on the Diagnostics page said "Reboot request
+  from api"). Diag page also now shows free heap / largest block.
+- **OTA works** and is much faster than the 115200 cable: update either board with
+  `esphome run homelab-panel.yaml --device homelab-panel-<id>.local`. Cable only
+  needed for a brand-new/bricked board. Both boards (04be24, 9c9c28) on latest.
+
 ## 2026-07-01
 
 - **Foundation pass shipped** (fw `2026.07.01-1`, flashed to `homelab-panel-04be24`):

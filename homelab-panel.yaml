@@ -38,7 +38,14 @@ esp32:
 logger:
   level: INFO
 
+# heap / reset-reason instrumentation (surfaced on the diagnostics page)
+debug:
+  update_interval: 30s
+
 api:
+  # Standalone panel: nothing connects to the native API (no Home Assistant), so
+  # disable the default 15-min "reboot if no client" timeout that was resetting it.
+  reboot_timeout: 0s
 ota:
   - platform: esphome
 
@@ -174,8 +181,15 @@ sensor:
   - platform: uptime
     id: sys_uptime
     update_interval: 5s
+  - platform: debug
+    free:
+      id: heap_free
+      name: "Heap Free"
+    block:
+      id: heap_block
+      name: "Heap Largest Block"
 
-# --- wifi info for the diagnostics page -------------------------------------
+# --- wifi info + reset reason for the diagnostics page ----------------------
 text_sensor:
   - platform: wifi_info
     ip_address:
@@ -186,6 +200,10 @@ text_sensor:
       id: wifi_bssid
     mac_address:
       id: wifi_mac
+  - platform: debug
+    reset_reason:
+      id: reset_reason
+      name: "Reset Reason"
 
 display:
   - platform: ili9xxx
@@ -300,24 +318,62 @@ script:
     then:
       - lambda: |-
           bool dk = id(g_dark);
-          uint32_t bg  = dk ? 0x101418 : 0xFFFFFF;
-          uint32_t fg  = dk ? 0xF0F0F0 : 0x000000;
-          uint32_t mut = dk ? 0x808080 : 0x909090;
+          uint32_t bg   = dk ? 0x101418 : 0xFFFFFF;
+          uint32_t fg   = dk ? 0xF0F0F0 : 0x000000;
+          uint32_t mut  = dk ? 0x808080 : 0x909090;
+          uint32_t surf = dk ? 0x1b212b : 0xEEF1F5;   // card surface
+          uint32_t trk  = dk ? 0x2a2f3a : 0xD5DBE2;   // gauge track
           lv_obj_t* pgs[4] = { id(page_cluster)->obj, id(page_pools)->obj, id(page_pbs)->obj, id(page_diag)->obj };
           for (int i = 0; i < 4; i++) {
             lv_obj_set_style_bg_color(pgs[i], lv_color_hex(bg), 0);
             lv_obj_set_style_bg_opa(pgs[i], LV_OPA_COVER, 0);
           }
+          lv_obj_t* cards[] = {
+            id(pc0), id(pc1), id(pc2), id(pc3),
+            id(bc0), id(bc1), id(bc2), id(bc3),
+            id(nc0), id(nc1), id(nc2), id(nc3), id(nc4)
+          };
+          for (unsigned i = 0; i < sizeof(cards)/sizeof(cards[0]); i++)
+            lv_obj_set_style_bg_color(cards[i], lv_color_hex(surf), 0);
+          lv_obj_t* trks[] = {
+            id(p0a), id(p1a), id(p2a), id(p3a),
+            id(b0a), id(b1a), id(b2a), id(b3a),
+            id(ca0), id(ca1), id(ca2), id(ca3), id(ca4),
+            id(cm0), id(cm1), id(cm2), id(cm3), id(cm4)
+          };
+          for (unsigned i = 0; i < sizeof(trks)/sizeof(trks[0]); i++)
+            lv_obj_set_style_arc_color(trks[i], lv_color_hex(trk), LV_PART_MAIN);
+          // arc thickness must be set on BOTH parts (top-level arc_width only
+          // styles the track). Thin concentric cluster rings, thicker singles.
+          lv_obj_t* thin[] = { id(ca0), id(ca1), id(ca2), id(ca3), id(ca4),
+                               id(cm0), id(cm1), id(cm2), id(cm3), id(cm4) };
+          for (unsigned i = 0; i < sizeof(thin)/sizeof(thin[0]); i++) {
+            lv_obj_set_style_arc_width(thin[i], 3, LV_PART_MAIN);
+            lv_obj_set_style_arc_width(thin[i], 3, LV_PART_INDICATOR);
+          }
+          lv_obj_t* thick[] = { id(p0a), id(p1a), id(p2a), id(p3a),
+                                id(b0a), id(b1a), id(b2a), id(b3a) };
+          for (unsigned i = 0; i < sizeof(thick)/sizeof(thick[0]); i++) {
+            lv_obj_set_style_arc_width(thick[i], 6, LV_PART_MAIN);
+            lv_obj_set_style_arc_width(thick[i], 6, LV_PART_INDICATOR);
+          }
           lv_obj_t* fgl[] = {
             id(t_cluster), id(t_pools), id(t_pbs), id(t_diag),
-            id(n0), id(n1), id(n2), id(n3), id(n4),
+            id(cl0), id(cl1), id(cl2), id(cl3), id(cl4),
             id(p0l), id(p1l), id(p2l), id(p3l),
+            id(p0v), id(p1v), id(p2v), id(p3v),
             id(b0l), id(b1l), id(b2l), id(b3l),
-            id(d_id), id(d_ssid), id(d_sig), id(d_ip), id(d_bssid), id(d_mac), id(d_uptime)
+            id(b0v), id(b1v), id(b2v), id(b3v),
+            id(d_id), id(d_ssid), id(d_sig), id(d_ip), id(d_bssid), id(d_mac), id(d_uptime), id(d_heap)
           };
           for (unsigned i = 0; i < sizeof(fgl)/sizeof(fgl[0]); i++)
             lv_obj_set_style_text_color(fgl[i], lv_color_hex(fg), 0);
-          lv_obj_t* mtl[] = { id(pg1), id(pg2), id(pg3), id(pg_diag) };
+          lv_obj_t* mtl[] = {
+            id(pg1), id(pg2), id(pg3), id(pg_diag), id(d_rst),
+            id(p0h), id(p1h), id(p2h), id(p3h),
+            id(b0g), id(b1g), id(b2g), id(b3g),
+            id(cv0), id(cv1), id(cv2), id(cv3), id(cv4)
+          };
           for (unsigned i = 0; i < sizeof(mtl)/sizeof(mtl[0]); i++)
             lv_obj_set_style_text_color(mtl[i], lv_color_hex(mut), 0);
 
@@ -338,52 +394,230 @@ lvgl:
     # --- page 1: cluster / nodes ---
     - id: page_cluster
       widgets:
-        - label: { id: t_cluster, x: 6,   y: 4, text: "CLUSTER", text_color: 0xF0F0F0 }
-        - label: { id: pg1,       x: 280, y: 4, text: "1/3",     text_color: 0x808080 }
-        - label: { id: n0, x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
-        - label: { id: n1, x: 8, y: 72,  text: "", text_color: 0xF0F0F0 }
-        - label: { id: n2, x: 8, y: 112, text: "", text_color: 0xF0F0F0 }
-        - label: { id: n3, x: 8, y: 152, text: "", text_color: 0xF0F0F0 }
-        - label: { id: n4, x: 8, y: 192, text: "", text_color: 0xF0F0F0 }
+        - label: { id: t_cluster, x: 8, y: 6, text: "CLUSTER", text_color: 0xF0F0F0, text_font: montserrat_16 }
+        - label: { id: pg1, x: 286, y: 8, text: "1/3", text_color: 0x808080 }
+        # 5 node cards: 3 across the top, 2 on the bottom. Each has concentric
+        # rings: CPU outer (cyan), MEM inner (orange), values in the footer.
+        - obj:
+            id: nc0
+            x: 6
+            y: 30
+            width: 100
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: cl0, align: TOP_MID, y: 4, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: ca0, align: CENTER, y: 3, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - arc: { id: cm0, align: CENTER, y: 3, width: 58, height: 58, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0xFF9F40 }, knob: { bg_opa: TRANSP } }
+              - label: { id: cv0, align: BOTTOM_MID, y: -3, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: nc1
+            x: 110
+            y: 30
+            width: 100
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: cl1, align: TOP_MID, y: 4, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: ca1, align: CENTER, y: 3, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - arc: { id: cm1, align: CENTER, y: 3, width: 58, height: 58, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0xFF9F40 }, knob: { bg_opa: TRANSP } }
+              - label: { id: cv1, align: BOTTOM_MID, y: -3, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: nc2
+            x: 214
+            y: 30
+            width: 100
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: cl2, align: TOP_MID, y: 4, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: ca2, align: CENTER, y: 3, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - arc: { id: cm2, align: CENTER, y: 3, width: 58, height: 58, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0xFF9F40 }, knob: { bg_opa: TRANSP } }
+              - label: { id: cv2, align: BOTTOM_MID, y: -3, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: nc3
+            x: 6
+            y: 132
+            width: 100
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: cl3, align: TOP_MID, y: 4, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: ca3, align: CENTER, y: 3, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - arc: { id: cm3, align: CENTER, y: 3, width: 58, height: 58, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0xFF9F40 }, knob: { bg_opa: TRANSP } }
+              - label: { id: cv3, align: BOTTOM_MID, y: -3, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: nc4
+            x: 110
+            y: 132
+            width: 100
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: cl4, align: TOP_MID, y: 4, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: ca4, align: CENTER, y: 3, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - arc: { id: cm4, align: CENTER, y: 3, width: 58, height: 58, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 3, arc_color: 0x2a2f3a, indicator: { arc_color: 0xFF9F40 }, knob: { bg_opa: TRANSP } }
+              - label: { id: cv4, align: BOTTOM_MID, y: -3, text: "", text_color: 0x808080, text_font: montserrat_12 }
     # --- page 2: truenas pools ---
     - id: page_pools
       widgets:
-        - label: { id: t_pools, x: 6,   y: 4, text: "POOLS", text_color: 0xF0F0F0 }
-        - label: { id: pg2,     x: 280, y: 4, text: "2/3",   text_color: 0x808080 }
-        - label: { id: p0l, x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: p0b, x: 8, y: 50,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: p1l, x: 8, y: 76,  text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: p1b, x: 8, y: 94,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: p2l, x: 8, y: 120, text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: p2b, x: 8, y: 138, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: p3l, x: 8, y: 164, text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: p3b, x: 8, y: 182, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: t_pools, x: 8, y: 6, text: "POOLS", text_color: 0xF0F0F0, text_font: montserrat_16 }
+        - label: { id: pg2, x: 286, y: 8, text: "2/3", text_color: 0x808080 }
+        - obj:
+            id: pc0
+            x: 6
+            y: 30
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: p0l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: p0a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: p0v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: p0h, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: pc1
+            x: 164
+            y: 30
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: p1l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: p1a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: p1v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: p1h, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: pc2
+            x: 6
+            y: 132
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: p2l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: p2a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: p2v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: p2h, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: pc3
+            x: 164
+            y: 132
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: p3l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: p3a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: p3v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: p3h, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
     # --- page 3: pbs datastores ---
     - id: page_pbs
       widgets:
-        - label: { id: t_pbs, x: 6,   y: 4, text: "BACKUPS", text_color: 0xF0F0F0 }
-        - label: { id: pg3,   x: 280, y: 4, text: "3/3",     text_color: 0x808080 }
-        - label: { id: b0l, x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: b0b, x: 8, y: 50,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: b1l, x: 8, y: 76,  text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: b1b, x: 8, y: 94,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: b2l, x: 8, y: 120, text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: b2b, x: 8, y: 138, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: b3l, x: 8, y: 164, text: "", text_color: 0xF0F0F0 }
-        - bar:   { id: b3b, x: 8, y: 182, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: t_pbs, x: 8, y: 6, text: "BACKUPS", text_color: 0xF0F0F0, text_font: montserrat_16 }
+        - label: { id: pg3, x: 286, y: 8, text: "3/3", text_color: 0x808080 }
+        - obj:
+            id: bc0
+            x: 6
+            y: 30
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: b0l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: b0a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: b0v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: b0g, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: bc1
+            x: 164
+            y: 30
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: b1l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: b1a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: b1v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: b1g, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: bc2
+            x: 6
+            y: 132
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: b2l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: b2a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: b2v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: b2g, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
+        - obj:
+            id: bc3
+            x: 164
+            y: 132
+            width: 150
+            height: 100
+            radius: 10
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1b212b
+            widgets:
+              - label: { id: b3l, align: TOP_MID, y: 6, text: "", text_color: 0xF0F0F0 }
+              - arc: { id: b3a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
+              - label: { id: b3v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
+              - label: { id: b3g, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
     # --- diagnostics (skipped by swipe/auto-cycle; double-tap to toggle) ---
     - id: page_diag
       skip: true
       widgets:
-        - label: { id: t_diag,  x: 6,   y: 4,   text: "DIAGNOSTICS", text_color: 0xF0F0F0 }
-        - label: { id: pg_diag, x: 250, y: 4,   text: "2xtap",       text_color: 0x808080 }
-        - label: { id: d_id,     x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
-        - label: { id: d_ssid,   x: 8, y: 58,  text: "", text_color: 0xF0F0F0 }
-        - label: { id: d_sig,    x: 8, y: 84,  text: "", text_color: 0xF0F0F0 }
-        - label: { id: d_ip,     x: 8, y: 110, text: "", text_color: 0xF0F0F0 }
-        - label: { id: d_bssid,  x: 8, y: 136, text: "", text_color: 0xF0F0F0 }
-        - label: { id: d_mac,    x: 8, y: 162, text: "", text_color: 0xF0F0F0 }
-        - label: { id: d_uptime, x: 8, y: 188, text: "", text_color: 0xF0F0F0 }
+        - label: { id: t_diag,  x: 8,   y: 4, text: "DIAGNOSTICS", text_color: 0xF0F0F0, text_font: montserrat_16 }
+        - label: { id: pg_diag, x: 258, y: 8, text: "2xtap",       text_color: 0x808080 }
+        - label: { id: d_id,     x: 8, y: 32,  text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_ssid,   x: 8, y: 54,  text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_sig,    x: 8, y: 76,  text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_ip,     x: 8, y: 98,  text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_bssid,  x: 8, y: 120, text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_mac,    x: 8, y: 142, text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_uptime, x: 8, y: 164, text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_heap,   x: 8, y: 186, text: "", text_color: 0xF0F0F0, text_font: montserrat_12 }
+        - label: { id: d_rst,    x: 8, y: 208, text: "", text_color: 0x808080, text_font: montserrat_12 }
 
 # --- poll + parse + render --------------------------------------------------
 interval:
@@ -429,8 +663,11 @@ interval:
                     lv_obj_set_style_text_color(id(t_pools), lv_color_hex(tcol), 0);
                     lv_obj_set_style_text_color(id(t_pbs),   lv_color_hex(tcol), 0);
 
-                    // --- cluster nodes ---
-                    lv_obj_t* nlbl[5] = { id(n0), id(n1), id(n2), id(n3), id(n4) };
+                    // --- cluster nodes (concentric CPU outer / MEM inner rings) ---
+                    lv_obj_t* clbl[5] = { id(cl0), id(cl1), id(cl2), id(cl3), id(cl4) };
+                    lv_obj_t* ccpu[5] = { id(ca0), id(ca1), id(ca2), id(ca3), id(ca4) };
+                    lv_obj_t* cmem[5] = { id(cm0), id(cm1), id(cm2), id(cm3), id(cm4) };
+                    lv_obj_t* cvl[5]  = { id(cv0), id(cv1), id(cv2), id(cv3), id(cv4) };
                     JsonArrayConst nodes = root["nodes"];
                     for (int i = 0; i < 5; i++) {
                       if (i < (int) nodes.size()) {
@@ -438,19 +675,35 @@ interval:
                         bool up = nodes[i]["up"] | false;
                         int cpu = nodes[i]["cpu"] | 0;
                         int mem = nodes[i]["mem"] | 0;
-                        if (up) snprintf(buf, sizeof(buf), "%-9s cpu %2d%%  mem %2d%%", nm, cpu, mem);
-                        else    snprintf(buf, sizeof(buf), "%-9s  ** DOWN **", nm);
-                        lv_label_set_text(nlbl[i], buf);
-                        lv_obj_set_style_text_color(nlbl[i],
-                            lv_color_hex(up ? c_fg : c_crit), 0);
+                        lv_label_set_text(clbl[i], nm);
+                        lv_obj_set_style_text_color(clbl[i], lv_color_hex(up ? c_fg : c_crit), 0);
+                        if (up) {
+                          lv_arc_set_value(ccpu[i], cpu);
+                          lv_arc_set_value(cmem[i], mem);
+                          lv_obj_set_style_arc_color(ccpu[i],
+                              lv_color_hex(cpu >= 90 ? c_crit : 0x33CCFF), LV_PART_INDICATOR);
+                          lv_obj_set_style_arc_color(cmem[i],
+                              lv_color_hex(mem >= 90 ? c_crit : 0xFF9F40), LV_PART_INDICATOR);
+                          snprintf(buf, sizeof(buf), "C%d  M%d", cpu, mem);
+                          lv_label_set_text(cvl[i], buf);
+                        } else {
+                          lv_arc_set_value(ccpu[i], 0);
+                          lv_arc_set_value(cmem[i], 0);
+                          lv_label_set_text(cvl[i], "DOWN");
+                        }
                       } else {
-                        lv_label_set_text(nlbl[i], "");
+                        lv_label_set_text(clbl[i], "");
+                        lv_label_set_text(cvl[i], "");
+                        lv_arc_set_value(ccpu[i], 0);
+                        lv_arc_set_value(cmem[i], 0);
                       }
                     }
 
-                    // --- truenas pools ---
+                    // --- truenas pools (gauge cards) ---
                     lv_obj_t* plbl[4] = { id(p0l), id(p1l), id(p2l), id(p3l) };
-                    lv_obj_t* pbar[4] = { id(p0b), id(p1b), id(p2b), id(p3b) };
+                    lv_obj_t* parc[4] = { id(p0a), id(p1a), id(p2a), id(p3a) };
+                    lv_obj_t* pval[4] = { id(p0v), id(p1v), id(p2v), id(p3v) };
+                    lv_obj_t* phl[4]  = { id(p0h), id(p1h), id(p2h), id(p3h) };
                     JsonArrayConst pools = root["pools"];
                     for (int i = 0; i < 4; i++) {
                       if (i < (int) pools.size()) {
@@ -458,23 +711,28 @@ interval:
                         const char* hl = pools[i]["health"] | "?";
                         bool ok = pools[i]["ok"] | false;
                         int used = pools[i]["used"] | 0;
-                        snprintf(buf, sizeof(buf), "%-12s %s  %d%%", nm, hl, used);
-                        lv_label_set_text(plbl[i], buf);
-                        lv_obj_set_style_text_color(plbl[i], lv_color_hex(c_fg), 0);
-                        lv_bar_set_value(pbar[i], used, LV_ANIM_OFF);
+                        lv_label_set_text(plbl[i], nm);
+                        snprintf(buf, sizeof(buf), "%d%%", used);
+                        lv_label_set_text(pval[i], buf);
+                        lv_label_set_text(phl[i], hl);
+                        lv_arc_set_value(parc[i], used);
                         uint32_t c = c_ok;
                         if (!ok) c = c_crit;               // degraded/unhealthy
                         else if (used >= 85) c = c_warn;   // near full
-                        lv_obj_set_style_bg_color(pbar[i], lv_color_hex(c), LV_PART_INDICATOR);
+                        lv_obj_set_style_arc_color(parc[i], lv_color_hex(c), LV_PART_INDICATOR);
                       } else {
                         lv_label_set_text(plbl[i], "");
-                        lv_bar_set_value(pbar[i], 0, LV_ANIM_OFF);
+                        lv_label_set_text(pval[i], "");
+                        lv_label_set_text(phl[i], "");
+                        lv_arc_set_value(parc[i], 0);
                       }
                     }
 
-                    // --- pbs datastores ---
+                    // --- pbs datastores (gauge cards, footer = GC age) ---
                     lv_obj_t* blbl[4] = { id(b0l), id(b1l), id(b2l), id(b3l) };
-                    lv_obj_t* bbar[4] = { id(b0b), id(b1b), id(b2b), id(b3b) };
+                    lv_obj_t* barc[4] = { id(b0a), id(b1a), id(b2a), id(b3a) };
+                    lv_obj_t* bval[4] = { id(b0v), id(b1v), id(b2v), id(b3v) };
+                    lv_obj_t* bgc[4]  = { id(b0g), id(b1g), id(b2g), id(b3g) };
                     JsonArrayConst pbs = root["pbs"];
                     for (int i = 0; i < 4; i++) {
                       if (i < (int) pbs.size()) {
@@ -482,18 +740,22 @@ interval:
                         int used = pbs[i]["used"] | 0;
                         bool has_gc = !pbs[i]["gc_age_h"].isNull();
                         float gc_h = pbs[i]["gc_age_h"] | 0.0f;
-                        if (has_gc) snprintf(buf, sizeof(buf), "%-12s %d%%  GC %.0fh", nm, used, gc_h);
-                        else        snprintf(buf, sizeof(buf), "%-12s %d%%  GC --", nm, used);
-                        lv_label_set_text(blbl[i], buf);
-                        lv_obj_set_style_text_color(blbl[i], lv_color_hex(c_fg), 0);
-                        lv_bar_set_value(bbar[i], used, LV_ANIM_OFF);
+                        lv_label_set_text(blbl[i], nm);
+                        snprintf(buf, sizeof(buf), "%d%%", used);
+                        lv_label_set_text(bval[i], buf);
+                        if (has_gc) snprintf(buf, sizeof(buf), "GC %.0fh", gc_h);
+                        else        snprintf(buf, sizeof(buf), "GC --");
+                        lv_label_set_text(bgc[i], buf);
+                        lv_arc_set_value(barc[i], used);
                         uint32_t c = c_ok;
                         if (used >= 85) c = c_warn;                // near full
                         if (has_gc && gc_h > 48.0f) c = c_warn;    // amber if GC older than 2 days
-                        lv_obj_set_style_bg_color(bbar[i], lv_color_hex(c), LV_PART_INDICATOR);
+                        lv_obj_set_style_arc_color(barc[i], lv_color_hex(c), LV_PART_INDICATOR);
                       } else {
                         lv_label_set_text(blbl[i], "");
-                        lv_bar_set_value(bbar[i], 0, LV_ANIM_OFF);
+                        lv_label_set_text(bval[i], "");
+                        lv_label_set_text(bgc[i], "");
+                        lv_arc_set_value(barc[i], 0);
                       }
                     }
                     return true;
@@ -543,3 +805,8 @@ interval:
           uint32_t up = (uint32_t) id(sys_uptime).state;
           snprintf(b, sizeof(b), "Up: %ud %02uh %02um", up/86400, (up%86400)/3600, (up%3600)/60);
           lv_label_set_text(id(d_uptime), b);
+          snprintf(b, sizeof(b), "Heap: %.0fK free / %.0fK blk",
+                   id(heap_free).state / 1024.0f, id(heap_block).state / 1024.0f);
+          lv_label_set_text(id(d_heap), b);
+          snprintf(b, sizeof(b), "Reset: %s", id(reset_reason).state.c_str());
+          lv_label_set_text(id(d_rst), b);
