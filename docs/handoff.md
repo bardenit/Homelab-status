@@ -25,7 +25,8 @@ Running notes; newest first. Pick up cold from the top.
   make a **WPA2-only / PMF-disabled** IoT SSID for the panels.
 - [ ] Build **v2 nav** (`docs/nav-architecture.md`), PVE drill-down first.
 - [ ] Flash the remaining CYDs.
-- [ ] PBS `gc_age_h` still null (see `todo.md`).
+- [x] PBS `gc_age_h` (resolved 2026-07-01: token needed the read-only `Audit`
+  role at `/` for `Sys.Audit`; granted to user + token per privsep. GC now shows).
 
 ---
 
