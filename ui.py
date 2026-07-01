@@ -18,8 +18,15 @@ import httpx
 import config
 
 
-def _row(label: str, value: str = "", state: str = "ok", drill: str | None = None) -> dict:
-    return {"label": label, "value": value, "state": state, "drill": drill}
+def _row(label: str, value: str = "", state: str = "ok", drill: str | None = None,
+         cpu: int | None = None, mem: int | None = None) -> dict:
+    r = {"label": label, "value": value, "state": state, "drill": drill}
+    # cpu/mem present => the panel renders this row as a gauge card, not a stat line
+    if cpu is not None:
+        r["cpu"] = cpu
+    if mem is not None:
+        r["mem"] = mem
+    return r
 
 
 def _screen(title: str, rows: list, path: str = "", parent: str | None = None) -> dict:
@@ -84,35 +91,31 @@ async def _pve(client, cfg, sub, path) -> dict:
             cpu = round((n.get("cpu") or 0) * 100)
             mem = _pct(n.get("mem", 0), n.get("maxmem", 0))
             rows.append(_row(n.get("node", "?"),
-                             f"cpu {cpu}%  mem {mem}%" if up else "DOWN",
+                             n.get("status", "?"),
                              "ok" if up else "crit",
-                             f"pve/node/{n.get('node')}"))
+                             f"pve/node/{n.get('node')}",
+                             cpu=cpu if up else 0, mem=mem if up else 0))
         return _screen("CLUSTER", rows, path, parent="")
 
-    # node: detail + its guests
+    # node: its VMs/LXCs as gauge cards
     if sub[0] == "node" and len(sub) >= 2:
         node = sub[1]
-        st = await _pve_get(client, cfg, f"nodes/{node}/status") or {}
-        rows = []
-        cpu = round((st.get("cpu") or 0) * 100)
-        mem = st.get("memory", {})
-        memp = _pct(mem.get("used", 0), mem.get("total", 0))
-        up_s = int(st.get("uptime", 0))
-        load = (st.get("loadavg") or ["?"])[0]
-        rows.append(_row("CPU", f"{cpu}%", "warn" if cpu >= 85 else "ok"))
-        rows.append(_row("Memory", f"{memp}%", "warn" if memp >= 85 else "ok"))
-        rows.append(_row("Load", str(load), "muted"))
-        rows.append(_row("Uptime", _dur(up_s), "muted"))
-
         guests = await _pve_get(client, cfg, "cluster/resources?type=vm") or []
-        here = [g for g in guests if g.get("node") == node]
-        for g in sorted(here, key=lambda x: x.get("vmid", 0)):
+        here = sorted([g for g in guests if g.get("node") == node],
+                      key=lambda x: x.get("vmid", 0))
+        rows = []
+        for g in here:
             running = g.get("status") == "running"
             kind = "vm" if g.get("type") == "qemu" else "ct"
+            gcpu = round((g.get("cpu") or 0) * 100) if running else 0
+            gmem = _pct(g.get("mem", 0), g.get("maxmem", 0)) if running else 0
             rows.append(_row(f"{kind} {g.get('vmid')} {g.get('name', '')}".strip(),
                              g.get("status", "?"),
                              "ok" if running else "muted",
-                             f"pve/guest/{g.get('vmid')}"))
+                             f"pve/guest/{g.get('vmid')}",
+                             cpu=gcpu, mem=gmem))
+        if not rows:
+            rows.append(_row("No guests", state="muted"))
         return _screen(node, rows, path, parent="pve/cluster")
 
     # guest: VM/LXC detail

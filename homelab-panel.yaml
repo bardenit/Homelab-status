@@ -64,7 +64,9 @@ wifi:
 # --- networking for the aggregator poll -------------------------------------
 http_request:
   useragent: esphome/cyd-panel
-  timeout: 6s
+  timeout: 4s         # MUST stay under the ~5s task watchdog: a stalled poll that
+                      # outlasts the watchdog reboots the board (reset reason
+                      # "Task Watchdog"). 4s lets a hung request fail gracefully.
   verify_ssl: false   # aggregator is plain HTTP on the LAN; harmless either way
 
 json:
