@@ -17,6 +17,7 @@ backends, handy for flashing/testing the CYD before wiring in real credentials.
 
 import asyncio
 import json
+import logging
 import ssl
 import time
 from typing import Any
@@ -29,6 +30,8 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import config
 import firmware
+
+log = logging.getLogger("aggregator")
 
 # --- helpers ---------------------------------------------------------------
 
@@ -170,29 +173,40 @@ async def fetch_pbs(client: httpx.AsyncClient, cfg: config.Config) -> dict:
     try:
         usage = (await _get(client, f"{base}/status/datastore-usage", headers, cfg.http_timeout)).get("data", [])
 
-        # Best-effort: most recent garbage-collection task end time, for a
-        # "last GC age" readout. Failure here must not drop the usage data.
-        gc_end = None
+        # Resolve the node name for the task-log path. The configured value (often
+        # "localhost") may not match PBS's real node name, so discover it and fall
+        # back to the configured value.
+        node = cfg.pbs_node
         try:
-            tasks = (await _get(
-                client,
-                f"{base}/nodes/{cfg.pbs_node}/tasks?typefilter=garbage_collection&limit=1",
-                headers,
-                cfg.http_timeout,
-            )).get("data", [])
-            if tasks:
-                gc_end = tasks[0].get("endtime")
-        except Exception:
-            pass
+            nodes = (await _get(client, f"{base}/nodes", headers, cfg.http_timeout)).get("data", [])
+            if nodes:
+                node = nodes[0].get("node") or node
+        except Exception as e:
+            log.warning("PBS node discovery failed (%s); using configured node %r", e, cfg.pbs_node)
 
         for d in usage:
+            store = d.get("store", "?")
             total = d.get("total", 0)
             used = d.get("used", 0)
+
+            # Most recent finished GC for THIS datastore. Scope by store so a
+            # Datastore.Audit token (not the task owner, and without Sys.Audit) is
+            # still allowed to see it, and so each datastore reports its own GC.
             gc_age_h = None
-            if gc_end:
-                gc_age_h = round((time.time() - gc_end) / 3600, 1)
+            try:
+                url = (f"{base}/nodes/{node}/tasks"
+                       f"?store={store}&typefilter=garbage_collection&limit=1")
+                tasks = (await _get(client, url, headers, cfg.http_timeout)).get("data", [])
+                gc_end = tasks[0].get("endtime") if tasks else None
+                if gc_end:
+                    gc_age_h = round((time.time() - gc_end) / 3600, 1)
+                else:
+                    log.warning("PBS GC lookup for %r on node %r returned no tasks", store, node)
+            except Exception as e:
+                log.warning("PBS GC lookup for %r on node %r failed: %s", store, node, e)
+
             out["datastores"].append({
-                "name": d.get("store", "?"),
+                "name": store,
                 "used": pct(used, total),
                 "gc_age_h": gc_age_h,
             })

@@ -62,8 +62,10 @@ run `esphome config` to validate, since that syntax shifts across versions.
 
 ## Conventions and invariants (do not break these)
 
-- Read-only tokens only: PVEAuditor on PVE, Datastore.Audit on PBS, a plain API
-  key on TrueNAS. Never request write scopes.
+- Read-only tokens only: PVEAuditor on PVE, the `Audit` role at `/` on PBS
+  (read-only; Datastore.Audit alone cannot see GC/task logs or list nodes, so the
+  broader all-read-only Audit role is needed for the GC-age readout), a plain API
+  key (Readonly Admin user) on TrueNAS. Never request write scopes.
 - PBS API token separator is a colon (`user@pbs!id:SECRET`), unlike PVE's `=`.
 - Per-source failure must degrade gracefully: mark that source false in
   `sources`, trip `alert`, and still return the rest of the payload. Never let
