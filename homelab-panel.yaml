@@ -2,22 +2,21 @@
 # Homelab status panel for the ESP32-2432S028R ("Cheap Yellow Display")
 #
 # Polls the FastAPI aggregator and renders cluster / pool / PBS health with
-# LVGL. RGB LED goes red on any alert; backlight auto-dims from the LDR.
+# LVGL. RGB LED goes red on any alert.
 #
-# BEFORE FLASHING:
-#   1. Run `esphome config homelab-panel.yaml` to validate. The LVGL block is
-#      the most likely place for a version-sensitive syntax tweak.
-#   2. Confirm your board variant. Most 2432S028R units are ILI9341 (set below).
-#      Some later runs ship an ST7789 panel and/or swap the USB chip and a few
-#      pins. If the screen is blank/garbled, that's the first thing to check.
-#   3. Set the secrets below (wifi + aggregator URL).
+# This board (confirmed): ST7789V panel, non-inverting, no PSRAM. Light + dark
+# themes supported; default dark. Gestures: swipe L/R = page nav, double-tap =
+# diagnostics page, long-press = toggle dark/light. Auto-cycles when idle.
+#
+# BEFORE FLASHING: `esphome config homelab-panel.yaml` to validate (the LVGL
+# block is the most version-sensitive part).
 # =============================================================================
 
 substitutions:
   name: homelab-panel
   agg_url: "http://10.10.10.14/api/status"   # production aggregator on the LXC
   poll_interval: "15s"
-  fw_version: "2026.06.29-1"
+  fw_version: "2026.07.01-1"
 
 esphome:
   name: ${name}
@@ -29,6 +28,7 @@ esphome:
     - lambda: |-
         id(g_panel_id) = get_mac_address().substr(6);
         id(backlight).set_level(1.0);   // full brightness: LDR is covered by the case
+    - script.execute: apply_theme       # paint the persisted dark/light theme
 
 esp32:
   board: esp32dev
@@ -44,16 +44,15 @@ ota:
 
 wifi:
   # One firmware, multiple locations: the panel connects to whichever configured
-  # network it finds (best signal). Hidden SSIDs need hidden: true so the device
-  # attempts them without relying on a scan.
+  # network it finds. Mark a network hidden ONLY if its SSID is not broadcast.
   power_save_mode: none   # wall-powered panel: prioritise a stable link
   networks:
-    - ssid: !secret wifi_jb_ssid          # work lab (hidden)
+    - ssid: !secret wifi_jb_ssid          # work lab (hidden SSID)
       password: !secret wifi_jb_password
       hidden: true
-    - ssid: !secret wifi_home_ssid        # home (placeholder until finalized)
+    - ssid: !secret wifi_home_ssid        # home (UniFi, broadcasts its SSID)
       password: !secret wifi_home_password
-      hidden: true                        # set false if the home SSID broadcasts
+      hidden: false
 
 # --- networking for the aggregator poll -------------------------------------
 http_request:
@@ -71,7 +70,7 @@ globals:
   - id: g_panel_id
     type: std::string
     restore_value: no
-  # multi-page nav state
+  # multi-page nav + gesture state
   - id: g_idle
     type: bool
     restore_value: no
@@ -88,6 +87,42 @@ globals:
     type: int
     restore_value: no
     initial_value: "0"
+  - id: g_touch_start_y
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: g_touch_last_y
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: g_touch_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: g_last_tap_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: g_last_tap_x
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: g_last_nav_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: g_gesture
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: g_diag
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: g_dark              # dark mode default-on, persists across reboots
+    type: bool
+    restore_value: yes
+    initial_value: "true"
 
 # --- two SPI buses: display and touch are separate on this board ------------
 spi:
@@ -100,7 +135,7 @@ spi:
     mosi_pin: 32
     miso_pin: 39
 
-# --- backlight (PWM) + LDR auto-dim -----------------------------------------
+# --- backlight (PWM) + LDR (unused, covered) --------------------------------
 output:
   - platform: ledc
     pin: 21
@@ -132,8 +167,25 @@ sensor:
           window_size: 4
           send_every: 4
     # Auto-dim disabled: the LDR is covered by the enclosure, so it always reads
-    # dark and would dim the screen. Backlight is pinned to full in on_boot. If a
-    # panel ever runs without a case, restore an on_value lambda to drive backlight.
+    # dark. Backlight is pinned to full in on_boot.
+  - platform: wifi_signal   # for the diagnostics page
+    id: wifi_rssi
+    update_interval: 5s
+  - platform: uptime
+    id: sys_uptime
+    update_interval: 5s
+
+# --- wifi info for the diagnostics page -------------------------------------
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: wifi_ip
+    ssid:
+      id: wifi_ssid
+    bssid:
+      id: wifi_bssid
+    mac_address:
+      id: wifi_mac
 
 display:
   - platform: ili9xxx
@@ -162,42 +214,121 @@ touchscreen:
       y_max: 3860
     transform:
       swap_xy: true
-    # Swipe: record start-x on first contact, track movement, decide on release.
-    # A tap (no horizontal movement) just cancels the auto-cycle.
     on_update:
       # fires every update_interval while touched, so it tracks finger movement
-      # (on_touch only fires once on initial press, which can't measure a swipe)
+      # and press duration (on_touch only fires once on initial press)
       - lambda: |-
           if (!touches.empty()) {
             int x = touches[0].x;
+            int y = touches[0].y;
             if (!id(g_touch_active)) {
               id(g_touch_active) = true;
               id(g_touch_start_x) = x;
+              id(g_touch_start_y) = y;
+              id(g_touch_start_ms) = millis();
             }
             id(g_touch_last_x) = x;
+            id(g_touch_last_y) = y;
             id(g_idle) = false;
           }
     on_release:
-      - lambda: 'id(g_touch_active) = false; id(g_idle) = false;'
+      # classify the gesture: 1=next 2=prev 3=diag-toggle 4=dark-toggle
+      - lambda: |-
+          id(g_touch_active) = false;
+          id(g_idle) = false;
+          uint32_t now = millis();
+          int dx = id(g_touch_last_x) - id(g_touch_start_x);
+          int dy = id(g_touch_last_y) - id(g_touch_start_y);
+          uint32_t dur = now - id(g_touch_start_ms);
+          bool moved = (abs(dx) > 30) || (abs(dy) > 30);
+          bool in_cooldown = (now - id(g_last_nav_ms) < 350);
+          int g = 0;
+          if (abs(dx) >= 40 && abs(dx) >= abs(dy)) {
+            // swipe; cooldown rejects touch chatter that splits one drag in two
+            if (!in_cooldown) {
+              g = (dx < 0) ? 2 : 1;   // swipe left = previous, swipe right = next
+              id(g_last_nav_ms) = now;
+            }
+          } else if (!in_cooldown) {
+            // Only classify taps/long-press outside the post-swipe cooldown, so a
+            // swipe's chatter fragments can't be read as taps and pair into a
+            // false double-tap.
+            if (!moved && dur >= 600) {
+              g = 4;                              // long press
+            } else if (!moved) {
+              // double tap: quick AND near the previous tap's position
+              if (now - id(g_last_tap_ms) < 300 &&
+                  abs(id(g_touch_start_x) - id(g_last_tap_x)) < 50) {
+                g = 3; id(g_last_tap_ms) = 0;
+              } else {
+                id(g_last_tap_ms) = now;
+                id(g_last_tap_x) = id(g_touch_start_x);
+              }
+            }
+          }
+          id(g_gesture) = g;
       - if:
-          condition:
-            lambda: 'return (id(g_touch_last_x) - id(g_touch_start_x)) <= -40;'
+          condition: { lambda: 'return id(g_gesture) == 1;' }
           then:
+            - lambda: 'id(g_diag) = false;'
             - lvgl.page.next:
       - if:
-          condition:
-            lambda: 'return (id(g_touch_last_x) - id(g_touch_start_x)) >= 40;'
+          condition: { lambda: 'return id(g_gesture) == 2;' }
           then:
+            - lambda: 'id(g_diag) = false;'
             - lvgl.page.previous:
+      - if:
+          condition: { lambda: 'return id(g_gesture) == 3;' }
+          then:
+            - if:
+                condition: { lambda: 'return !id(g_diag);' }
+                then:
+                  - lvgl.page.show: page_diag
+                  - lambda: 'id(g_diag) = true;'
+                else:
+                  - lvgl.page.show: page_cluster
+                  - lambda: 'id(g_diag) = false;'
+      - if:
+          condition: { lambda: 'return id(g_gesture) == 4;' }
+          then:
+            - lambda: 'id(g_dark) = !id(g_dark);'
+            - script.execute: apply_theme
+
+# --- theme: paint page backgrounds + label colors for dark/light ------------
+script:
+  - id: apply_theme
+    then:
+      - lambda: |-
+          bool dk = id(g_dark);
+          uint32_t bg  = dk ? 0x101418 : 0xFFFFFF;
+          uint32_t fg  = dk ? 0xF0F0F0 : 0x000000;
+          uint32_t mut = dk ? 0x808080 : 0x909090;
+          lv_obj_t* pgs[4] = { id(page_cluster)->obj, id(page_pools)->obj, id(page_pbs)->obj, id(page_diag)->obj };
+          for (int i = 0; i < 4; i++) {
+            lv_obj_set_style_bg_color(pgs[i], lv_color_hex(bg), 0);
+            lv_obj_set_style_bg_opa(pgs[i], LV_OPA_COVER, 0);
+          }
+          lv_obj_t* fgl[] = {
+            id(t_cluster), id(t_pools), id(t_pbs), id(t_diag),
+            id(n0), id(n1), id(n2), id(n3), id(n4),
+            id(p0l), id(p1l), id(p2l), id(p3l),
+            id(b0l), id(b1l), id(b2l), id(b3l),
+            id(d_id), id(d_ssid), id(d_sig), id(d_ip), id(d_bssid), id(d_mac), id(d_uptime)
+          };
+          for (unsigned i = 0; i < sizeof(fgl)/sizeof(fgl[0]); i++)
+            lv_obj_set_style_text_color(fgl[i], lv_color_hex(fg), 0);
+          lv_obj_t* mtl[] = { id(pg1), id(pg2), id(pg3), id(pg_diag) };
+          for (unsigned i = 0; i < sizeof(mtl)/sizeof(mtl[0]); i++)
+            lv_obj_set_style_text_color(mtl[i], lv_color_hex(mut), 0);
 
 # --- the dashboard ----------------------------------------------------------
 lvgl:
   # No PSRAM on this CYD: a full-screen buffer (320x240x2 = 150KB) won't fit in
   # internal RAM alongside WiFi. Buffer a quarter-screen and render in chunks.
   buffer_size: 25%
-  disp_bg_color: 0xFFFFFF   # light theme: white bg, black text (this panel renders light)
+  disp_bg_color: 0x101418   # default dark; apply_theme sets per-page bg by g_dark
   default_font: montserrat_14
-  page_wrap: true           # loop Cluster -> Pools -> Backups -> Cluster
+  page_wrap: true           # loop Cluster -> Pools -> Backups (diag is skipped)
   # After 10s with no touch, mark idle so the auto-cycle interval advances pages.
   on_idle:
     timeout: 10s
@@ -207,39 +338,52 @@ lvgl:
     # --- page 1: cluster / nodes ---
     - id: page_cluster
       widgets:
-        - label: { id: t_cluster, x: 6,   y: 4, text: "CLUSTER", text_color: 0x000000 }
-        - label: { id: pg1,       x: 280, y: 4, text: "1/3",     text_color: 0x909090 }
-        - label: { id: n0, x: 8, y: 32,  text: "", text_color: 0x000000 }
-        - label: { id: n1, x: 8, y: 72,  text: "", text_color: 0x000000 }
-        - label: { id: n2, x: 8, y: 112, text: "", text_color: 0x000000 }
-        - label: { id: n3, x: 8, y: 152, text: "", text_color: 0x000000 }
-        - label: { id: n4, x: 8, y: 192, text: "", text_color: 0x000000 }
+        - label: { id: t_cluster, x: 6,   y: 4, text: "CLUSTER", text_color: 0xF0F0F0 }
+        - label: { id: pg1,       x: 280, y: 4, text: "1/3",     text_color: 0x808080 }
+        - label: { id: n0, x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
+        - label: { id: n1, x: 8, y: 72,  text: "", text_color: 0xF0F0F0 }
+        - label: { id: n2, x: 8, y: 112, text: "", text_color: 0xF0F0F0 }
+        - label: { id: n3, x: 8, y: 152, text: "", text_color: 0xF0F0F0 }
+        - label: { id: n4, x: 8, y: 192, text: "", text_color: 0xF0F0F0 }
     # --- page 2: truenas pools ---
     - id: page_pools
       widgets:
-        - label: { id: t_pools, x: 6,   y: 4, text: "POOLS", text_color: 0x000000 }
-        - label: { id: pg2,     x: 280, y: 4, text: "2/3",   text_color: 0x909090 }
-        - label: { id: p0l, x: 8, y: 32,  text: "", text_color: 0x000000 }
+        - label: { id: t_pools, x: 6,   y: 4, text: "POOLS", text_color: 0xF0F0F0 }
+        - label: { id: pg2,     x: 280, y: 4, text: "2/3",   text_color: 0x808080 }
+        - label: { id: p0l, x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
         - bar:   { id: p0b, x: 8, y: 50,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: p1l, x: 8, y: 76,  text: "", text_color: 0x000000 }
+        - label: { id: p1l, x: 8, y: 76,  text: "", text_color: 0xF0F0F0 }
         - bar:   { id: p1b, x: 8, y: 94,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: p2l, x: 8, y: 120, text: "", text_color: 0x000000 }
+        - label: { id: p2l, x: 8, y: 120, text: "", text_color: 0xF0F0F0 }
         - bar:   { id: p2b, x: 8, y: 138, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: p3l, x: 8, y: 164, text: "", text_color: 0x000000 }
+        - label: { id: p3l, x: 8, y: 164, text: "", text_color: 0xF0F0F0 }
         - bar:   { id: p3b, x: 8, y: 182, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
     # --- page 3: pbs datastores ---
     - id: page_pbs
       widgets:
-        - label: { id: t_pbs, x: 6,   y: 4, text: "BACKUPS", text_color: 0x000000 }
-        - label: { id: pg3,   x: 280, y: 4, text: "3/3",     text_color: 0x909090 }
-        - label: { id: b0l, x: 8, y: 32,  text: "", text_color: 0x000000 }
+        - label: { id: t_pbs, x: 6,   y: 4, text: "BACKUPS", text_color: 0xF0F0F0 }
+        - label: { id: pg3,   x: 280, y: 4, text: "3/3",     text_color: 0x808080 }
+        - label: { id: b0l, x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
         - bar:   { id: b0b, x: 8, y: 50,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: b1l, x: 8, y: 76,  text: "", text_color: 0x000000 }
+        - label: { id: b1l, x: 8, y: 76,  text: "", text_color: 0xF0F0F0 }
         - bar:   { id: b1b, x: 8, y: 94,  width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: b2l, x: 8, y: 120, text: "", text_color: 0x000000 }
+        - label: { id: b2l, x: 8, y: 120, text: "", text_color: 0xF0F0F0 }
         - bar:   { id: b2b, x: 8, y: 138, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: b3l, x: 8, y: 164, text: "", text_color: 0x000000 }
+        - label: { id: b3l, x: 8, y: 164, text: "", text_color: 0xF0F0F0 }
         - bar:   { id: b3b, x: 8, y: 182, width: 300, height: 8, min_value: 0, max_value: 100, value: 0 }
+    # --- diagnostics (skipped by swipe/auto-cycle; double-tap to toggle) ---
+    - id: page_diag
+      skip: true
+      widgets:
+        - label: { id: t_diag,  x: 6,   y: 4,   text: "DIAGNOSTICS", text_color: 0xF0F0F0 }
+        - label: { id: pg_diag, x: 250, y: 4,   text: "2xtap",       text_color: 0x808080 }
+        - label: { id: d_id,     x: 8, y: 32,  text: "", text_color: 0xF0F0F0 }
+        - label: { id: d_ssid,   x: 8, y: 58,  text: "", text_color: 0xF0F0F0 }
+        - label: { id: d_sig,    x: 8, y: 84,  text: "", text_color: 0xF0F0F0 }
+        - label: { id: d_ip,     x: 8, y: 110, text: "", text_color: 0xF0F0F0 }
+        - label: { id: d_bssid,  x: 8, y: 136, text: "", text_color: 0xF0F0F0 }
+        - label: { id: d_mac,    x: 8, y: 162, text: "", text_color: 0xF0F0F0 }
+        - label: { id: d_uptime, x: 8, y: 188, text: "", text_color: 0xF0F0F0 }
 
 # --- poll + parse + render --------------------------------------------------
 interval:
@@ -255,15 +399,21 @@ interval:
           on_response:
             then:
               - lambda: |-
+                  bool dk = id(g_dark);
+                  uint32_t c_fg   = dk ? 0xF0F0F0 : 0x000000;
+                  uint32_t c_crit = dk ? 0xFF5555 : 0xCC0000;
+                  uint32_t c_warn = dk ? 0xFFC040 : 0xC07000;
+                  uint32_t c_ok   = dk ? 0x66DD66 : 0x2E9E2E;
+
                   if (response->status_code != 200) {
                     lv_label_set_text(id(t_cluster), "CLUSTER  unreachable");
-                    lv_obj_set_style_text_color(id(t_cluster), lv_color_hex(0xCC0000), 0);
-                    lv_obj_set_style_text_color(id(t_pools),   lv_color_hex(0xCC0000), 0);
-                    lv_obj_set_style_text_color(id(t_pbs),     lv_color_hex(0xCC0000), 0);
+                    lv_obj_set_style_text_color(id(t_cluster), lv_color_hex(c_crit), 0);
+                    lv_obj_set_style_text_color(id(t_pools),   lv_color_hex(c_crit), 0);
+                    lv_obj_set_style_text_color(id(t_pbs),     lv_color_hex(c_crit), 0);
                     id(g_alert) = true;
                     return;
                   }
-                  json::parse_json(body, [](JsonObjectConst root) -> bool {
+                  json::parse_json(body, [c_fg, c_crit, c_warn, c_ok](JsonObjectConst root) -> bool {
                     char buf[48];
 
                     bool quorate = root["quorate"] | false;
@@ -271,11 +421,11 @@ interval:
                     id(g_alert) = alert;
 
                     // page titles: amber on alert; cluster also shows quorum (red if lost)
-                    uint32_t tcol = alert ? 0xC07000 : 0x000000;
+                    uint32_t tcol = alert ? c_warn : c_fg;
                     snprintf(buf, sizeof(buf), "CLUSTER  quorum:%s", quorate ? "OK" : "LOST");
                     lv_label_set_text(id(t_cluster), buf);
                     lv_obj_set_style_text_color(id(t_cluster),
-                        lv_color_hex(quorate ? tcol : 0xCC0000), 0);
+                        lv_color_hex(quorate ? tcol : c_crit), 0);
                     lv_obj_set_style_text_color(id(t_pools), lv_color_hex(tcol), 0);
                     lv_obj_set_style_text_color(id(t_pbs),   lv_color_hex(tcol), 0);
 
@@ -292,7 +442,7 @@ interval:
                         else    snprintf(buf, sizeof(buf), "%-9s  ** DOWN **", nm);
                         lv_label_set_text(nlbl[i], buf);
                         lv_obj_set_style_text_color(nlbl[i],
-                            up ? lv_color_hex(0x000000) : lv_color_hex(0xCC0000), 0);
+                            lv_color_hex(up ? c_fg : c_crit), 0);
                       } else {
                         lv_label_set_text(nlbl[i], "");
                       }
@@ -310,10 +460,11 @@ interval:
                         int used = pools[i]["used"] | 0;
                         snprintf(buf, sizeof(buf), "%-12s %s  %d%%", nm, hl, used);
                         lv_label_set_text(plbl[i], buf);
+                        lv_obj_set_style_text_color(plbl[i], lv_color_hex(c_fg), 0);
                         lv_bar_set_value(pbar[i], used, LV_ANIM_OFF);
-                        uint32_t c = 0x4CAF50;            // green
-                        if (!ok) c = 0xCC0000;            // degraded/unhealthy
-                        else if (used >= 85) c = 0xC07000; // near full
+                        uint32_t c = c_ok;
+                        if (!ok) c = c_crit;               // degraded/unhealthy
+                        else if (used >= 85) c = c_warn;   // near full
                         lv_obj_set_style_bg_color(pbar[i], lv_color_hex(c), LV_PART_INDICATOR);
                       } else {
                         lv_label_set_text(plbl[i], "");
@@ -334,10 +485,11 @@ interval:
                         if (has_gc) snprintf(buf, sizeof(buf), "%-12s %d%%  GC %.0fh", nm, used, gc_h);
                         else        snprintf(buf, sizeof(buf), "%-12s %d%%  GC --", nm, used);
                         lv_label_set_text(blbl[i], buf);
+                        lv_obj_set_style_text_color(blbl[i], lv_color_hex(c_fg), 0);
                         lv_bar_set_value(bbar[i], used, LV_ANIM_OFF);
-                        uint32_t c = 0x4CAF50;
-                        if (used >= 85) c = 0xC07000;              // near full
-                        if (has_gc && gc_h > 48.0f) c = 0xC07000;  // amber if GC older than 2 days
+                        uint32_t c = c_ok;
+                        if (used >= 85) c = c_warn;                // near full
+                        if (has_gc && gc_h > 48.0f) c = c_warn;    // amber if GC older than 2 days
                         lv_obj_set_style_bg_color(bbar[i], lv_color_hex(c), LV_PART_INDICATOR);
                       } else {
                         lv_label_set_text(blbl[i], "");
@@ -346,7 +498,7 @@ interval:
                     }
                     return true;
                   });
-      # drive the RGB LED from the alert flag (red on alert, dim green otherwise)
+      # drive the RGB LED from the alert flag (red on alert, dark otherwise)
       - if:
           condition:
             lambda: "return id(g_alert);"
@@ -356,7 +508,7 @@ interval:
             - output.turn_off: led_b
           else:
             - output.turn_off: led_r
-            - output.turn_off: led_g   # leave green off too for a dark idle; flip to turn_on if you want a green "all good" light
+            - output.turn_off: led_g
             - output.turn_off: led_b
 
   # auto-cycle: once idle (no touch for 10s), advance one page every 5s
@@ -366,4 +518,28 @@ interval:
           condition:
             lambda: "return id(g_idle);"
           then:
+            - lambda: 'id(g_diag) = false;'
             - lvgl.page.next:
+
+  # refresh the diagnostics page from wifi/system info every 2s
+  - interval: 2s
+    then:
+      - lambda: |-
+          char b[64];
+          snprintf(b, sizeof(b), "ID: %s   fw ${fw_version}", id(g_panel_id).c_str());
+          lv_label_set_text(id(d_id), b);
+          snprintf(b, sizeof(b), "SSID: %s", id(wifi_ssid).state.c_str());
+          lv_label_set_text(id(d_ssid), b);
+          float rssi = id(wifi_rssi).state;
+          if (rssi != rssi) snprintf(b, sizeof(b), "Signal: (disconnected)");
+          else              snprintf(b, sizeof(b), "Signal: %.0f dBm", rssi);
+          lv_label_set_text(id(d_sig), b);
+          snprintf(b, sizeof(b), "IP: %s", id(wifi_ip).state.c_str());
+          lv_label_set_text(id(d_ip), b);
+          snprintf(b, sizeof(b), "BSSID: %s", id(wifi_bssid).state.c_str());
+          lv_label_set_text(id(d_bssid), b);
+          snprintf(b, sizeof(b), "MAC: %s", id(wifi_mac).state.c_str());
+          lv_label_set_text(id(d_mac), b);
+          uint32_t up = (uint32_t) id(sys_uptime).state;
+          snprintf(b, sizeof(b), "Up: %ud %02uh %02um", up/86400, (up%86400)/3600, (up%3600)/60);
+          lv_label_set_text(id(d_uptime), b);

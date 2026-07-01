@@ -1,4 +1,35 @@
-# Session handoff — 2026-06-29
+# Session handoff
+
+Running notes; newest first. Pick up cold from the top.
+
+## 2026-07-01
+
+- **Foundation pass shipped** (fw `2026.07.01-1`, flashed to `homelab-panel-04be24`):
+  - **Dark mode** default; **long-press** toggles dark/light; persists across reboot.
+  - **Diagnostics page** (**double-tap** to toggle; skipped by swipe/auto-cycle):
+    panel id + fw, SSID, signal dBm, IP, BSSID, MAC, uptime. Uses ESPHome
+    `wifi_info` / `wifi_signal` / `uptime`.
+  - **Gestures**: swipe (right=next, left=prev), double-tap=diag, long-press=theme.
+    Tuned for the resistive panel's chatter — a **350ms post-swipe cooldown** drops
+    chatter fragments so a swipe can't fake a double-tap.
+  - **WiFi home fix**: home SSID set `hidden: false` (Jason-Sanitized broadcasts).
+- **v2 design drafted**: `docs/nav-architecture.md` — menu-driven thin client
+  (aggregator serves navigable screens; device is a generic list/detail browser;
+  integrations are Python providers). Rollout: PVE drill-down → TrueNAS/PBS depth
+  → UniFi → Plex.
+
+### Still open after today
+- [ ] **Re-test home WiFi.** `hidden:false` is fixed, but the home WLAN is
+  **WPA2/WPA3 + PMF Optional** — the classic ESP32 blocker (UniFi warns about it
+  on that screen). If it still won't join, confirm via the diagnostics page, then
+  make a **WPA2-only / PMF-disabled** IoT SSID for the panels.
+- [ ] Build **v2 nav** (`docs/nav-architecture.md`), PVE drill-down first.
+- [ ] Flash the remaining CYDs.
+- [ ] PBS `gc_age_h` still null (see `todo.md`).
+
+---
+
+## 2026-06-29
 
 Where we are and what's next, so we can pick this up cold tomorrow.
 
