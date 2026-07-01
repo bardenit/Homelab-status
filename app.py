@@ -30,6 +30,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import config
 import firmware
+import ui
 
 log = logging.getLogger("aggregator")
 
@@ -345,6 +346,14 @@ async def status(request: Request):
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "mock": config.get().mock}
+
+
+# --- navigable drill-down screens (public; the panel browses these) ---------
+
+@app.get("/ui")
+@app.get("/ui/{path:path}")
+async def ui_screen(path: str = ""):
+    return await ui.screen(path)
 
 
 # --- firmware / OTA (public; panels cannot authenticate) --------------------
