@@ -24,7 +24,7 @@ Running notes; newest first. Pick up cold from the top.
   on that screen). If it still won't join, confirm via the diagnostics page, then
   make a **WPA2-only / PMF-disabled** IoT SSID for the panels.
 - [ ] Build **v2 nav** (`docs/nav-architecture.md`), PVE drill-down first.
-- [ ] Flash the remaining CYDs.
+- [ ] Flash the remaining CYDs. (Done so far, both ST7789V: `04be24`, `9c9c28`.)
 - [x] PBS `gc_age_h` (resolved 2026-07-01: token needed the read-only `Audit`
   role at `/` for `Sys.Audit`; granted to user + token per privsep. GC now shows).
 
