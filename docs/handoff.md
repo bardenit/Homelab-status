@@ -2,6 +2,23 @@
 
 Running notes; newest first. Pick up cold from the top.
 
+## 2026-07-02
+
+- **Drill-down for all three sources.** TrueNAS provider (pools -> pool detail:
+  status, used/free, fragmentation, auto-TRIM, last scrub + errors, vdev layout,
+  disks online/total) and PBS provider (datastores -> detail: used/total/free,
+  last GC, last verify, backup groups). Both use single-ring cards for the list.
+- **Direct-tap drill.** Tapping a glance card (node/pool/datastore) drills
+  straight into it - the redundant intermediate list is gone. Payload carries a
+  pre-encoded `drill` path per node/pool/datastore; firmware hit-tests the tap to
+  the card and jumps to that path. Double-tap the header strip still = Diagnostics.
+- **Buffer-size bug (important).** ESPHome `http_request` default response buffer
+  is **1 kB**; adding `drill` fields pushed /api/status to ~1KB and it truncated,
+  so the panel went blank (structure renders, parse fails). Fix: set
+  `max_response_buffer_size: 8kB` **on each http_request.get action** (it is a
+  per-GET option, NOT on the top-level component). This also covers larger /ui
+  screens. Was also the cause of the PBS drill "nothing happens".
+
 ## 2026-07-01 (later)
 
 - **Gauge dashboard**: Pools/Backups are 2x2 cards with round `arc` gauges (used

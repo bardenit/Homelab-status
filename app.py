@@ -21,6 +21,7 @@ import logging
 import ssl
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -74,6 +75,7 @@ async def fetch_pve(client: httpx.AsyncClient, cfg: config.Config) -> dict:
                 "up": up,
                 "cpu": round((n.get("cpu") or 0) * 100) if up else 0,
                 "mem": pct(n.get("mem", 0), n.get("maxmem", 0)) if up else 0,
+                "drill": f"pve/node/{quote(str(n.get('node', '')), safe='')}",
             })
     except Exception:
         out["err"] = True
@@ -156,6 +158,7 @@ async def fetch_truenas(client: httpx.AsyncClient, cfg: config.Config) -> dict:
                         "health": status,
                         "ok": bool(healthy) and status == "ONLINE",
                         "used": used,
+                        "drill": f"truenas/pool/{quote(str(name), safe='')}",
                     })
     except Exception:
         out["err"] = True
@@ -210,6 +213,7 @@ async def fetch_pbs(client: httpx.AsyncClient, cfg: config.Config) -> dict:
                 "name": store,
                 "used": pct(used, total),
                 "gc_age_h": gc_age_h,
+                "drill": f"pbs/datastore/{quote(str(store), safe='')}",
             })
     except Exception:
         out["err"] = True

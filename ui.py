@@ -13,7 +13,14 @@ Screen shape:
              "drill": str|None}]}
 """
 
+import asyncio
+import json
+import ssl
+import time
+from urllib.parse import quote
+
 import httpx
+import websockets
 
 import config
 
@@ -60,6 +67,43 @@ async def _pve_get(client: httpx.AsyncClient, cfg: config.Config, sub: str):
     return r.json().get("data")
 
 
+async def _pbs_get(client: httpx.AsyncClient, cfg: config.Config, sub: str):
+    base = f"https://{cfg.pbs_host}/api2/json"
+    headers = {"Authorization": f"PBSAPIToken={cfg.pbs_token_id}:{cfg.pbs_secret}"}  # colon, not =
+    r = await client.get(f"{base}/{sub}", headers=headers, timeout=cfg.http_timeout)
+    r.raise_for_status()
+    return r.json().get("data")
+
+
+# --- TrueNAS helper (JSON-RPC over WebSocket, mirrors app.fetch_truenas) -----
+
+async def _tn_call(cfg: config.Config, method: str, params=None):
+    uri = f"wss://{cfg.truenas_host}/api/current"
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    async with asyncio.timeout(cfg.http_timeout * 2):
+        async with websockets.connect(uri, ssl=ctx) as ws:
+            rid = 0
+
+            async def call(m, p=None):
+                nonlocal rid
+                rid += 1
+                mid = rid
+                await ws.send(json.dumps({"jsonrpc": "2.0", "id": mid, "method": m, "params": p or []}))
+                while True:
+                    msg = json.loads(await ws.recv())
+                    if msg.get("id") != mid:
+                        continue
+                    if "error" in msg:
+                        raise RuntimeError(msg["error"])
+                    return msg.get("result")
+
+            if not await call("auth.login_with_api_key", [cfg.truenas_key]):
+                raise RuntimeError("auth failed")
+            return await call(method, params)
+
+
 # --- entry point ------------------------------------------------------------
 
 async def screen(path: str) -> dict:
@@ -72,7 +116,11 @@ async def screen(path: str) -> dict:
             parts = path.split("/")
             if parts[0] == "pve":
                 return await _pve(client, cfg, parts[1:], path)
-            # other providers land here later (truenas, pbs, unifi, plex)
+            if parts[0] == "truenas":
+                return await _truenas(cfg, parts[1:], path)
+            if parts[0] == "pbs":
+                return await _pbs(client, cfg, parts[1:], path)
+            # other providers land here later (unifi, plex)
             return _screen(parts[0].upper(), [_row("Not implemented yet", state="muted")],
                            path, parent="")
     except Exception as e:
@@ -82,8 +130,8 @@ async def screen(path: str) -> dict:
 def _home() -> dict:
     return _screen("HOMELAB", [
         _row("Cluster", "PVE", "ok", "pve/cluster"),
-        _row("Pools", "TrueNAS", "muted", "truenas/pools"),
-        _row("Backups", "PBS", "muted", "pbs/datastores"),
+        _row("Pools", "TrueNAS", "ok", "truenas/pools"),
+        _row("Backups", "PBS", "ok", "pbs/datastores"),
     ], path="")
 
 
@@ -104,7 +152,7 @@ async def _pve(client, cfg, sub, path) -> dict:
             rows.append(_row(n.get("node", "?"),
                              n.get("status", "?"),
                              "ok" if up else "crit",
-                             f"pve/node/{n.get('node')}",
+                             f"pve/node/{quote(str(n.get('node')), safe='')}",
                              cpu=cpu if up else 0, mem=mem if up else 0))
         return _screen("CLUSTER", rows, path, parent="")
 
@@ -155,6 +203,138 @@ async def _pve(client, cfg, sub, path) -> dict:
         return _screen(name, rows, path, parent=f"pve/node/{g.get('node')}", layout="list")
 
     return _screen("CLUSTER", [_row("Unknown path", state="crit")], path, parent="")
+
+
+# --- TrueNAS provider -------------------------------------------------------
+
+async def _truenas(cfg: config.Config, sub, path) -> dict:
+    if not (cfg.truenas_host and cfg.truenas_key):
+        return _screen("POOLS", [_row("TrueNAS not configured", state="crit")], path, parent="")
+    pools = await _tn_call(cfg, "pool.query") or []
+
+    # pools list -> single-ring cards (used %)
+    if not sub or sub[0] == "pools":
+        rows = []
+        for p in sorted(pools, key=lambda x: x.get("name", "")):
+            used = _pct(p.get("allocated", 0), p.get("size", 0))
+            ok = bool(p.get("healthy")) and p.get("status") == "ONLINE"
+            rows.append(_row(p.get("name", "?"), p.get("status", "?"),
+                             "ok" if ok else "crit",
+                             f"truenas/pool/{quote(str(p.get('name')), safe='')}",
+                             cpu=used))
+        return _screen("POOLS", rows, path, parent="")
+
+    # pool detail -> stats + drive health + cleanup info
+    if sub[0] == "pool" and len(sub) >= 2:
+        name = sub[1]
+        p = next((x for x in pools if x.get("name") == name), None)
+        if not p:
+            return _screen(name, [_row("Not found", state="crit")], path,
+                           parent="truenas/pools", layout="list")
+        used = _pct(p.get("allocated", 0), p.get("size", 0))
+        ok = bool(p.get("healthy")) and p.get("status") == "ONLINE"
+
+        online = total = 0
+        vtypes = []
+        for v in (p.get("topology") or {}).get("data", []):
+            if v.get("type"):
+                vtypes.append(v["type"])
+            for d in v.get("children", []):
+                total += 1
+                if d.get("status") == "ONLINE":
+                    online += 1
+
+        scan = p.get("scan") or {}
+        et = (scan.get("end_time") or {}).get("$date")
+        if et:
+            days = (time.time() - et / 1000) / 86400
+            errs = scan.get("errors", 0)
+            scrub = f"{days:.0f}d ago, {errs} err"
+            scrub_state = "ok" if not errs else "crit"
+        else:
+            scrub, scrub_state = "never", "muted"
+
+        rows = [
+            _row("Status", p.get("status", "?"), "ok" if ok else "crit"),
+            _row("Used", f"{_bytes(p.get('allocated', 0))} ({used}%)", "warn" if used >= 85 else "ok"),
+            _row("Free", _bytes(p.get("free", 0)), "muted"),
+            _row("Fragment", f"{p.get('fragmentation', 0)}%", "muted"),
+            _row("Auto TRIM", (p.get("autotrim") or {}).get("value", "?"), "muted"),
+            _row("Last Scrub", scrub, scrub_state),
+            _row("Layout", ", ".join(vtypes) or "?", "muted"),
+            _row("Disks", f"{online}/{total} ONLINE", "ok" if total and online == total else "crit"),
+        ]
+        return _screen(name, rows, path, parent="truenas/pools", layout="list")
+
+    return _screen("POOLS", [_row("Unknown path", state="crit")], path, parent="")
+
+
+# --- PBS provider -----------------------------------------------------------
+
+async def _pbs(client, cfg: config.Config, sub, path) -> dict:
+    if not (cfg.pbs_host and cfg.pbs_token_id and cfg.pbs_secret):
+        return _screen("BACKUPS", [_row("PBS not configured", state="crit")], path, parent="")
+    usage = await _pbs_get(client, cfg, "status/datastore-usage") or []
+
+    # datastores list -> single-ring cards (used %)
+    if not sub or sub[0] == "datastores":
+        rows = []
+        for d in sorted(usage, key=lambda x: x.get("store", "")):
+            used = _pct(d.get("used", 0), d.get("total", 0))
+            rows.append(_row(d.get("store", "?"), _bytes(d.get("used", 0)),
+                             "warn" if used >= 85 else "ok",
+                             f"pbs/datastore/{quote(str(d.get('store')), safe='')}",
+                             cpu=used))
+        return _screen("BACKUPS", rows, path, parent="")
+
+    # datastore detail
+    if sub[0] == "datastore" and len(sub) >= 2:
+        name = sub[1]
+        d = next((x for x in usage if x.get("store") == name), None)
+        if not d:
+            return _screen(name, [_row("Not found", state="crit")], path,
+                           parent="pbs/datastores", layout="list")
+        total = d.get("total", 0)
+        used = d.get("used", 0)
+        usedp = _pct(used, total)
+        avail = d.get("avail", total - used)
+        rows = [
+            _row("Used", f"{_bytes(used)} ({usedp}%)", "warn" if usedp >= 85 else "ok"),
+            _row("Total", _bytes(total), "muted"),
+            _row("Free", _bytes(avail), "muted"),
+        ]
+        q = quote(str(name), safe="")
+        # last GC (best-effort; needs Sys.Audit which the Audit role grants)
+        try:
+            tasks = await _pbs_get(
+                client, cfg,
+                f"nodes/{cfg.pbs_node}/tasks?store={q}&typefilter=garbage_collection&limit=1") or []
+            if tasks and tasks[0].get("endtime"):
+                days = (time.time() - tasks[0]["endtime"]) / 86400
+                ok = (tasks[0].get("status") or "OK") == "OK"
+                rows.append(_row("Last GC", f"{days:.0f}d ago", "ok" if ok else "warn"))
+        except Exception:
+            pass
+        # last verify (best-effort)
+        try:
+            tasks = await _pbs_get(
+                client, cfg,
+                f"nodes/{cfg.pbs_node}/tasks?store={q}&typefilter=verify&limit=1") or []
+            if tasks and tasks[0].get("endtime"):
+                days = (time.time() - tasks[0]["endtime"]) / 86400
+                ok = (tasks[0].get("status") or "OK") == "OK"
+                rows.append(_row("Last Verify", f"{days:.0f}d ago", "ok" if ok else "warn"))
+        except Exception:
+            pass
+        # backup group count (best-effort)
+        try:
+            groups = await _pbs_get(client, cfg, f"admin/datastore/{q}/groups") or []
+            rows.append(_row("Backup Groups", str(len(groups)), "muted"))
+        except Exception:
+            pass
+        return _screen(name, rows, path, parent="pbs/datastores", layout="list")
+
+    return _screen("BACKUPS", [_row("Unknown path", state="crit")], path, parent="")
 
 
 def _dur(sec: int) -> str:
