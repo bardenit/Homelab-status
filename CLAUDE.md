@@ -16,19 +16,30 @@ sees the small pre-digested payload.
 
 ## Repo layout
 
+Flat, no `aggregator/` or `esphome/` subdirs. The Python service and the
+firmware live side by side at the repo root:
+
 ```
-aggregator/
-  app.py                FastAPI service (async httpx, TTL cache, mock mode)
-  config.py             runtime config: /data/config.json overlays env vars
-  admin.py              /admin web UI: first-run password, login, config form
-  templates/            Jinja templates for the admin UI
-  requirements.txt
-  Dockerfile
-  .env                  seeds defaults on first run; admin UI owns config after
-esphome/
-  homelab-panel.yaml    CYD firmware (two SPI buses, LVGL, LDR dim, RGB LED)
-  secrets.yaml.example  wifi creds
+app.py                FastAPI service: /api/status sweep, /api/unifi fast lane,
+                      /ui drill-down, /firmware OTA, TTL cache, mock mode, lifespan
+backends.py           shared plumbing: TrueNAS JSON-RPC/WebSocket session,
+                      PVE/PBS/UniFi header builders + api_get, UniFi site/gateway
+                      resolution, formatting helpers, one pooled httpx client
+ui.py                 /ui/<path> drill-down screen providers (PVE, TrueNAS, PBS, UniFi)
+admin.py              /admin web UI: first-run password, login, config form, firmware upload
+probe.py              per-source connection probes behind the admin Test buttons
+firmware.py           /firmware OTA manifest + binary hosting, per-panel version check-ins
+config.py             runtime config: /data/config.json overlays env vars (fails loud)
+templates/            Jinja templates for the admin UI
+tests/test_smoke.py   mock-mode smoke tests (payload contract, admin gating, config)
+requirements.txt      runtime deps
+requirements-dev.txt  dev deps (pytest), pulls in requirements.txt
+Dockerfile
 docker-compose.yml
+.env                  seeds defaults on first run; admin UI owns config after
+homelab-panel.yaml    CYD firmware (ESPHome: two SPI buses, LVGL, LDR dim, RGB LED)
+secrets.yaml.example  wifi creds
+docs/                 handoff notes, nav architecture, API reference
 README.md
 ```
 
@@ -36,12 +47,22 @@ README.md
 
 Aggregator:
 ```bash
-cd aggregator && cp .env.example .env     # fill in hosts + tokens
-cd .. && docker compose up -d --build
+cp .env.example .env                      # fill in hosts + tokens
+docker compose up -d --build
 curl http://localhost:8000/api/status
 ```
 Set `MOCK=1` in `.env` to serve realistic fake data (down node, degraded pool,
 near-full pool) with no backends, for testing the display end to end.
+
+Tests (mock-mode smoke suite, no backends needed):
+```bash
+docker run --rm -v "$PWD":/src -w /src python:3.12-slim \
+  sh -c "pip install -q -r requirements-dev.txt; python -m pytest tests/ -q"
+```
+
+The container runs hardened: non-root uid 1000, `cap_drop: ALL`,
+`no-new-privileges`, read-only rootfs, tmpfs `/tmp`. The `./data` volume must be
+owned by uid 1000, so once on the host run `chown -R 1000:1000 ./data`.
 
 Config after first run: open `http://localhost:8000/admin`, set an admin
 password (first visit only), then enter hosts/tokens in the form. These persist
@@ -50,9 +71,9 @@ restart. The `.env` values only seed the initial form; the JSON file wins once
 it exists. `/api/status` and `/healthz` stay public (the CYD cannot log in);
 everything under `/admin` is password-gated.
 
-Firmware:
+Firmware (`homelab-panel.yaml` at the repo root):
 ```bash
-cd esphome && cp secrets.yaml.example secrets.yaml
+cp secrets.yaml.example secrets.yaml
 # set agg_url in homelab-panel.yaml to the aggregator host:port
 esphome config homelab-panel.yaml         # ALWAYS validate before flashing
 esphome run homelab-panel.yaml
@@ -97,7 +118,7 @@ run `esphome config` to validate, since that syntax shifts across versions.
 }
 ```
 The firmware reads widgets by index. If you change field names or array shapes,
-update the parse lambda in `esphome/homelab-panel.yaml` in the same change.
+update the parse lambda in `homelab-panel.yaml` in the same change.
 
 ## My environment (confirm with me, do not guess)
 
@@ -123,16 +144,15 @@ update the parse lambda in `esphome/homelab-panel.yaml` in the same change.
 
 ## Backlog (rough priority)
 
-1. Second LVGL page with touch-to-switch (touch is wired but unused). Candidates:
-   per-pool detail, or a VM/LXC up/down list pulled from PVE
-   `/cluster/resources?type=vm`.
-2. Show `gc_age_h` on the PBS row (already in the payload, not yet displayed).
-   Color it amber if GC is older than N days.
-3. "All good" green LED state (currently idle is dark; flip the `else` branch in
+Done: touch-driven multi-page nav with drill-down (`/ui` providers for PVE,
+TrueNAS, PBS, UniFi) and the PBS `gc_age_h` readout (last-GC on the datastore
+detail screen).
+
+1. "All good" green LED state (currently idle is dark; flip the `else` branch in
    the interval automation).
-4. On-screen "last updated" age and a stale indicator if the aggregator poll
+2. On-screen "last updated" age and a stale indicator if the aggregator poll
    fails, so a frozen panel is obvious.
-5. Optional: expose Prometheus-style metrics from the aggregator for Grafana,
+3. Optional: expose Prometheus-style metrics from the aggregator for Grafana,
    reusing the same fetch functions.
 
 ## Working agreement

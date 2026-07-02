@@ -2,6 +2,40 @@
 
 Running notes; newest first. Pick up cold from the top.
 
+## 2026-07-02 (later still): Cleanup + consolidation pass
+
+- **New `backends.py`.** Consolidated the low-level plumbing that had been
+  copy-pasted across `app.py`, `ui.py`, and `probe.py`: three separate TrueNAS
+  JSON-RPC-over-WebSocket implementations collapse into one `truenas_session`,
+  and the duplicated PVE/PBS/UniFi header builders, the unwrap-`data` `api_get`,
+  UniFi site/gateway resolution, and the formatting helpers now live in one
+  place. Callers import them instead of redefining.
+- **Shared persistent httpx client.** One pooled `httpx.AsyncClient` in
+  `backends.client()`, closed via the FastAPI lifespan hook. The 1s UniFi fast
+  lane no longer re-handshakes TLS every poll (it reuses the pooled connection).
+- **`config.load()` fails loudly.** When `/data/config.json` exists but is
+  unreadable (bad perms, corrupt JSON), it logs the real error and `/healthz`
+  reports `config: error` instead of silently falling back to env/defaults and
+  masquerading as an "Incorrect password" at login. It never overwrites an
+  unreadable config, and `/admin/setup` refuses to run in that state.
+- **`POST /admin/login`** now redirects to `/admin/setup` when no password is
+  set yet (matching the GET route), instead of failing the login.
+- **CSP header on `/admin`** (plus `no-store` / `no-referrer`), pinning fetches
+  and forms to this origin and banning framing/objects.
+- **pytest smoke suite** in `tests/test_smoke.py` (payload contract, admin
+  gating, config behavior), run under MOCK=1 via the python:3.12-slim docker
+  one-liner: `docker run --rm -v "$PWD":/src -w /src python:3.12-slim sh -c
+  "pip install -q -r requirements-dev.txt; python -m pytest tests/ -q"`.
+- Mock outputs verified byte-identical to the previous image (pure refactor, no
+  payload change).
+- **Security review fixes** (from the audit pass): the admin Test buttons only
+  fall back to a saved secret when the submitted host matches the saved host,
+  so a Test cannot be pointed at an arbitrary host to exfiltrate a stored
+  credential; firmware uploads are capped at 8 MB (rejected up front via
+  Content-Length, and again after read); login verification is serialized
+  behind a lock so parallel POSTs cannot multiply the PBKDF2 cost, making the
+  1s failure delay a true global rate limit.
+
 ## 2026-07-02 (later) — UniFi
 
 - **UniFi integration.** UDM Pro SE, Integration API (X-API-KEY, base

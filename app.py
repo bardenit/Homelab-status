@@ -16,58 +16,44 @@ backends, handy for flashing/testing the CYD before wiring in real credentials.
 """
 
 import asyncio
-import json
 import logging
-import ssl
+import random
 import time
-from typing import Any
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-import httpx
-import websockets
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
+import backends
 import config
 import firmware
 import ui
+from backends import api_get, pct
 
 log = logging.getLogger("aggregator")
-
-# --- helpers ---------------------------------------------------------------
-
-def pct(used: float, total: float) -> int:
-    if not total:
-        return 0
-    return max(0, min(100, round(used / total * 100)))
-
-
-async def _get(client: httpx.AsyncClient, url: str, headers: dict, timeout: float) -> Any:
-    r = await client.get(url, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
 
 
 # --- source: Proxmox VE -----------------------------------------------------
 
-async def fetch_pve(client: httpx.AsyncClient, cfg: config.Config) -> dict:
+async def fetch_pve(cfg: config.Config) -> dict:
     out: dict = {"nodes": [], "quorate": None, "err": False}
     if not (cfg.pve_host and cfg.pve_token_id and cfg.pve_secret):
         out["err"] = True
         return out
-    base = f"https://{cfg.pve_host}/api2/json"
-    headers = {"Authorization": f"PVEAPIToken={cfg.pve_token_id}={cfg.pve_secret}"}
+    base = backends.pve_base(cfg.pve_host)
+    headers = backends.pve_headers(cfg.pve_token_id, cfg.pve_secret)
     try:
         # quorum
-        status = (await _get(client, f"{base}/cluster/status", headers, cfg.http_timeout)).get("data", [])
+        status = await api_get(f"{base}/cluster/status", headers, cfg.http_timeout) or []
         for item in status:
             if item.get("type") == "cluster":
                 out["quorate"] = bool(item.get("quorate"))
                 break
 
         # per-node resources in one shot
-        res = (await _get(client, f"{base}/cluster/resources?type=node", headers, cfg.http_timeout)).get("data", [])
+        res = await api_get(f"{base}/cluster/resources?type=node", headers, cfg.http_timeout) or []
         for n in sorted(res, key=lambda x: x.get("node", "")):
             up = n.get("status") == "online"
             out["nodes"].append({
@@ -82,83 +68,48 @@ async def fetch_pve(client: httpx.AsyncClient, cfg: config.Config) -> dict:
     return out
 
 
-# --- source: TrueNAS --------------------------------------------------------
-#
-# TrueNAS uses the JSON-RPC 2.0 over WebSocket API (wss://host/api/current).
-# The legacy REST API (/api/v2.0) is deprecated as of SCALE 25.04 and removed
-# in 26. TLS is mandatory: TrueNAS revokes any API key presented over plain ws.
-
-class _RpcConn:
-    """Minimal JSON-RPC 2.0 caller over an open websocket connection."""
-
-    def __init__(self, ws: Any) -> None:
-        self.ws = ws
-        self._id = 0
-
-    async def call(self, method: str, params: list | None = None) -> Any:
-        self._id += 1
-        req_id = self._id
-        await self.ws.send(json.dumps({
-            "jsonrpc": "2.0", "id": req_id, "method": method, "params": params or [],
-        }))
-        # Skip event notifications until we see the reply matching our id.
-        while True:
-            msg = json.loads(await self.ws.recv())
-            if msg.get("id") != req_id:
-                continue
-            if "error" in msg:
-                raise RuntimeError(msg["error"])
-            return msg.get("result")
-
+# --- source: TrueNAS (JSON-RPC over WebSocket, see backends.truenas_session) --
 
 async def fetch_truenas(cfg: config.Config) -> dict:
     out: dict = {"pools": [], "err": False}
     if not (cfg.truenas_host and cfg.truenas_key):
         out["err"] = True
         return out
-    uri = f"wss://{cfg.truenas_host}/api/current"
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
     try:
-        async with asyncio.timeout(cfg.http_timeout * 2):
-            async with websockets.connect(uri, ssl=ssl_ctx) as ws:
-                rpc = _RpcConn(ws)
-                if not await rpc.call("auth.login_with_api_key", [cfg.truenas_key]):
-                    out["err"] = True
-                    return out
+        async with backends.truenas_session(
+            cfg.truenas_host, cfg.truenas_key, cfg.http_timeout
+        ) as rpc:
+            pools = await rpc.call("pool.query")
+            for p in pools:
+                name = p.get("name", "?")
+                status = p.get("status", "UNKNOWN")
+                healthy = p.get("healthy", status == "ONLINE")
 
-                pools = await rpc.call("pool.query")
-                for p in pools:
-                    name = p.get("name", "?")
-                    status = p.get("status", "UNKNOWN")
-                    healthy = p.get("healthy", status == "ONLINE")
+                # Capacity: pool object may carry size/allocated on some
+                # versions. If not present, fall back to the root dataset
+                # usage, which is stable across SCALE releases.
+                size = p.get("size")
+                alloc = p.get("allocated")
+                if size and alloc is not None:
+                    used = pct(alloc, size)
+                else:
+                    used = 0
+                    try:
+                        ds = await rpc.call("pool.dataset.query", [[["id", "=", name]]])
+                        if ds:
+                            u = ds[0].get("used", {}).get("parsed", 0)
+                            a = ds[0].get("available", {}).get("parsed", 0)
+                            used = pct(u, u + a)
+                    except Exception:
+                        pass
 
-                    # Capacity: pool object may carry size/allocated on some
-                    # versions. If not present, fall back to the root dataset
-                    # usage, which is stable across SCALE releases.
-                    size = p.get("size")
-                    alloc = p.get("allocated")
-                    if size and alloc is not None:
-                        used = pct(alloc, size)
-                    else:
-                        used = 0
-                        try:
-                            ds = await rpc.call("pool.dataset.query", [[["id", "=", name]]])
-                            if ds:
-                                u = ds[0].get("used", {}).get("parsed", 0)
-                                a = ds[0].get("available", {}).get("parsed", 0)
-                                used = pct(u, u + a)
-                        except Exception:
-                            pass
-
-                    out["pools"].append({
-                        "name": name,
-                        "health": status,
-                        "ok": bool(healthy) and status == "ONLINE",
-                        "used": used,
-                        "drill": f"truenas/pool/{quote(str(name), safe='')}",
-                    })
+                out["pools"].append({
+                    "name": name,
+                    "health": status,
+                    "ok": bool(healthy) and status == "ONLINE",
+                    "used": used,
+                    "drill": f"truenas/pool/{quote(str(name), safe='')}",
+                })
     except Exception:
         out["err"] = True
     return out
@@ -166,22 +117,22 @@ async def fetch_truenas(cfg: config.Config) -> dict:
 
 # --- source: PBS ------------------------------------------------------------
 
-async def fetch_pbs(client: httpx.AsyncClient, cfg: config.Config) -> dict:
+async def fetch_pbs(cfg: config.Config) -> dict:
     out: dict = {"datastores": [], "err": False}
     if not (cfg.pbs_host and cfg.pbs_token_id and cfg.pbs_secret):
         out["err"] = True
         return out
-    base = f"https://{cfg.pbs_host}/api2/json"
-    headers = {"Authorization": f"PBSAPIToken={cfg.pbs_token_id}:{cfg.pbs_secret}"}
+    base = backends.pbs_base(cfg.pbs_host)
+    headers = backends.pbs_headers(cfg.pbs_token_id, cfg.pbs_secret)
     try:
-        usage = (await _get(client, f"{base}/status/datastore-usage", headers, cfg.http_timeout)).get("data", [])
+        usage = await api_get(f"{base}/status/datastore-usage", headers, cfg.http_timeout) or []
 
         # Resolve the node name for the task-log path. The configured value (often
         # "localhost") may not match PBS's real node name, so discover it and fall
         # back to the configured value.
         node = cfg.pbs_node
         try:
-            nodes = (await _get(client, f"{base}/nodes", headers, cfg.http_timeout)).get("data", [])
+            nodes = await api_get(f"{base}/nodes", headers, cfg.http_timeout) or []
             if nodes:
                 node = nodes[0].get("node") or node
         except Exception as e:
@@ -199,7 +150,7 @@ async def fetch_pbs(client: httpx.AsyncClient, cfg: config.Config) -> dict:
             try:
                 url = (f"{base}/nodes/{node}/tasks"
                        f"?store={store}&typefilter=garbage_collection&limit=1")
-                tasks = (await _get(client, url, headers, cfg.http_timeout)).get("data", [])
+                tasks = await api_get(url, headers, cfg.http_timeout) or []
                 gc_end = tasks[0].get("endtime") if tasks else None
                 if gc_end:
                     gc_age_h = round((time.time() - gc_end) / 3600, 1)
@@ -221,9 +172,6 @@ async def fetch_pbs(client: httpx.AsyncClient, cfg: config.Config) -> dict:
 
 # --- source: UniFi ----------------------------------------------------------
 
-_UNIFI_GW_KEYWORDS = ("dream machine", "gateway", "uxg", "ucg", "udr", "udw", "udm")
-
-
 # Memoized IDs + slow-changing counts so the fast path is a single API call
 # (the gateway's statistics/latest). Site/gateway are re-resolved rarely; the
 # device/client counts refresh on a slower cadence than the live throughput.
@@ -236,13 +184,6 @@ UNIFI_ID_TTL = 300.0     # re-resolve site/gateway ids every 5 min
 UNIFI_COUNT_TTL = 15.0   # refresh device/client counts every 15s
 
 
-async def _unifi_uget(client, base, headers, timeout, sub):
-    r = await client.get(f"{base}/{sub}", headers=headers, timeout=timeout)
-    r.raise_for_status()
-    body = r.json()
-    return body["data"] if isinstance(body, dict) and "data" in body else body
-
-
 async def fetch_unifi_fast(cfg: config.Config) -> dict:
     out: dict = {"wan_down": 0.0, "wan_up": 0.0, "cpu": 0, "mem": 0,
                  "clients": _unifi_counts["clients"],
@@ -251,43 +192,36 @@ async def fetch_unifi_fast(cfg: config.Config) -> dict:
     if not (cfg.unifi_host and cfg.unifi_key):
         out["err"] = True
         return out
-    base = f"https://{cfg.unifi_host}/proxy/network/integration/v1"
-    headers = {"X-API-KEY": cfg.unifi_key, "Accept": "application/json"}
+    base = backends.unifi_base(cfg.unifi_host)
+    headers = backends.unifi_headers(cfg.unifi_key)
     now = time.time()
     try:
-        async with httpx.AsyncClient(verify=False) as client:
-            # (re)resolve site + gateway id, and refresh counts, only when stale
-            if _unifi_ids["gw"] is None or (now - _unifi_ids["ts"]) > UNIFI_ID_TTL \
-                    or (now - _unifi_counts["ts"]) > UNIFI_COUNT_TTL:
-                sites = await _unifi_uget(client, base, headers, cfg.http_timeout, "sites") or []
-                site = sites[0]["id"] if sites else cfg.unifi_site
-                if cfg.unifi_site and cfg.unifi_site != "default":
-                    site = next((s["id"] for s in sites
-                                 if cfg.unifi_site in (s.get("name"), s.get("id"))), site)
-                devices = await _unifi_uget(client, base, headers, cfg.http_timeout,
-                                            f"sites/{site}/devices") or []
-                gw = next((d for d in devices
-                           if any(k in (d.get("model", "") + d.get("name", "")).lower()
-                                  for k in _UNIFI_GW_KEYWORDS)), devices[0] if devices else None)
-                _unifi_ids.update(site=site, gw=(gw or {}).get("id"), ts=now)
-                clients = await _unifi_uget(client, base, headers, cfg.http_timeout,
-                                            f"sites/{site}/clients") or []
-                _unifi_counts.update(clients=len(clients),
-                                     dev_online=sum(1 for d in devices if d.get("state") == "ONLINE"),
-                                     dev_total=len(devices), ts=now)
-                out.update(clients=_unifi_counts["clients"],
-                           dev_online=_unifi_counts["dev_online"],
-                           dev_total=_unifi_counts["dev_total"])
+        # (re)resolve site + gateway id, and refresh counts, only when stale
+        if _unifi_ids["gw"] is None or (now - _unifi_ids["ts"]) > UNIFI_ID_TTL \
+                or (now - _unifi_counts["ts"]) > UNIFI_COUNT_TTL:
+            site = await backends.unifi_site_id(
+                cfg.unifi_host, cfg.unifi_key, cfg.unifi_site, cfg.http_timeout)
+            devices = await api_get(f"{base}/sites/{site}/devices", headers, cfg.http_timeout) or []
+            gw = backends.pick_gateway(devices)
+            _unifi_ids.update(site=site, gw=(gw or {}).get("id"), ts=now)
+            clients = await api_get(f"{base}/sites/{site}/clients", headers, cfg.http_timeout) or []
+            _unifi_counts.update(clients=len(clients),
+                                 dev_online=sum(1 for d in devices if d.get("state") == "ONLINE"),
+                                 dev_total=len(devices), ts=now)
+            out.update(clients=_unifi_counts["clients"],
+                       dev_online=_unifi_counts["dev_online"],
+                       dev_total=_unifi_counts["dev_total"])
 
-            # the live call: gateway throughput + load (one request)
-            if _unifi_ids["gw"]:
-                st = await _unifi_uget(client, base, headers, cfg.http_timeout,
-                                       f"sites/{_unifi_ids['site']}/devices/{_unifi_ids['gw']}/statistics/latest") or {}
-                up = st.get("uplink") or {}
-                out["wan_down"] = round(float(up.get("rxRateBps", 0)) * 8 / 1_000_000, 1)
-                out["wan_up"] = round(float(up.get("txRateBps", 0)) * 8 / 1_000_000, 1)
-                out["cpu"] = round(st.get("cpuUtilizationPct") or 0)
-                out["mem"] = round(st.get("memoryUtilizationPct") or 0)
+        # the live call: gateway throughput + load (one request)
+        if _unifi_ids["gw"]:
+            st = await api_get(
+                f"{base}/sites/{_unifi_ids['site']}/devices/{_unifi_ids['gw']}/statistics/latest",
+                headers, cfg.http_timeout) or {}
+            up = st.get("uplink") or {}
+            out["wan_down"] = round(float(up.get("rxRateBps", 0)) * 8 / 1_000_000, 1)
+            out["wan_up"] = round(float(up.get("txRateBps", 0)) * 8 / 1_000_000, 1)
+            out["cpu"] = round(st.get("cpuUtilizationPct") or 0)
+            out["mem"] = round(st.get("memoryUtilizationPct") or 0)
     except Exception:
         out["err"] = True
         _unifi_ids["gw"] = None  # force re-resolve next time
@@ -334,7 +268,6 @@ def mock_payload() -> dict:
 
 
 def mock_unifi() -> dict:
-    import random
     return {"wan_down": round(random.uniform(20, 120), 1),
             "wan_up": round(random.uniform(5, 40), 1),
             "cpu": random.randint(15, 45), "mem": 60,
@@ -375,13 +308,11 @@ async def build_payload() -> dict:
     if cfg.mock:
         return mock_payload()
 
-    # one client, self-signed certs are the norm on these boxes. UniFi is NOT
-    # here: it has its own fast /api/unifi lane so the panel can poll it quickly
-    # without dragging the heavy PVE/TrueNAS/PBS sweep along.
-    async with httpx.AsyncClient(verify=False) as client:
-        pve, tn, pbs = await asyncio.gather(
-            fetch_pve(client, cfg), fetch_truenas(cfg), fetch_pbs(client, cfg)
-        )
+    # UniFi is NOT here: it has its own fast /api/unifi lane so the panel can
+    # poll it quickly without dragging the heavy PVE/TrueNAS/PBS sweep along.
+    pve, tn, pbs = await asyncio.gather(
+        fetch_pve(cfg), fetch_truenas(cfg), fetch_pbs(cfg)
+    )
 
     payload = {
         "ts": int(time.time()),
@@ -418,7 +349,14 @@ async def get_cached() -> dict:
 
 _cfg = config.load()
 
-app = FastAPI(title="Homelab Panel Aggregator")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    await backends.close_client()
+
+
+app = FastAPI(title="Homelab Panel Aggregator", lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=_cfg.session_secret,
@@ -437,9 +375,16 @@ async def security_headers(request: Request, call_next):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     if request.url.path.startswith("/admin"):
-        # never let a browser or proxy cache admin pages (config forms, etc.)
+        # never let a browser or proxy cache admin pages (config forms, etc.);
+        # CSP is pragmatic (the config page uses one inline script) but still
+        # pins all fetches/forms to this origin and bans framing/objects
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
+        )
     return resp
 
 
@@ -463,7 +408,13 @@ async def api_unifi():
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "mock": config.get().mock}
+    # config: "error" means /data/config.json exists but could not be read
+    # (bad volume perms / corrupt JSON) and the app fell back to env defaults.
+    return {
+        "ok": True,
+        "mock": config.get().mock,
+        "config": "error" if config.load_error else "ok",
+    }
 
 
 # --- navigable drill-down screens (public; the panel browses these) ---------
@@ -488,6 +439,9 @@ async def firmware_manifest(request: Request):
     now = time.time()
     if now - _manifest_hits.get(ip, 0) < config.get().fw_min_interval:
         return Response(status_code=429)
+    # drop stale entries so the map cannot grow without bound
+    for stale in [k for k, ts in _manifest_hits.items() if now - ts > 3600]:
+        del _manifest_hits[stale]
     _manifest_hits[ip] = now
 
     m = firmware.manifest()

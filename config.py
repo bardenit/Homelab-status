@@ -13,13 +13,21 @@ writable place to persist hosts, tokens, and the admin password hash.
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+log = logging.getLogger("aggregator.config")
+
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/data/config.json"))
+
+# Set when CONFIG_PATH exists but could not be read or parsed (bad volume
+# permissions, corrupt JSON). Surfaced via /healthz so a broken volume shows
+# up as a config error instead of a mystery "Incorrect password" at login.
+load_error: "str | None" = None
 
 
 def _env(key: str, default: str = "") -> str:
@@ -132,8 +140,9 @@ _cfg: "Config | None" = None
 
 def load() -> Config:
     """Build the live config from defaults + env, then overlay the JSON file."""
-    global _cfg
+    global _cfg, load_error
     cfg = Config.from_env()
+    load_error = None
     if CONFIG_PATH.exists():
         try:
             data = json.loads(CONFIG_PATH.read_text())
@@ -146,15 +155,26 @@ def load() -> Config:
                 cfg.pve_token_id, cfg.pve_secret = _split_token(data["pve_token"], "=")
             if data.get("pbs_token"):
                 cfg.pbs_token_id, cfg.pbs_secret = _split_token(data["pbs_token"], ":")
-        except Exception:
-            pass  # corrupt file: fall back to env/defaults rather than crash
-    # a stable session secret so cookies survive restarts; persist best-effort
+        except Exception as e:
+            # Do NOT silently fall back: this is how a volume permission problem
+            # once masqueraded as a login failure. Run on env/defaults so the
+            # service stays up, but shout, flag it, and never write over the
+            # file we could not read.
+            load_error = f"{type(e).__name__}: {e}"
+            log.error(
+                "FAILED to read %s (%s); running on env/defaults. "
+                "Check the volume ownership (app runs as uid 1000) and JSON validity.",
+                CONFIG_PATH, load_error,
+            )
+    # a stable session secret so cookies survive restarts; persist best-effort,
+    # but never touch the config file if we failed to read it above
     if not cfg.session_secret:
         cfg.session_secret = secrets.token_urlsafe(32)
-        try:
-            _write(cfg)
-        except Exception:
-            pass
+        if load_error is None:
+            try:
+                _write(cfg)
+            except Exception:
+                pass
     _cfg = cfg
     return _cfg
 

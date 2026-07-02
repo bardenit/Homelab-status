@@ -13,16 +13,12 @@ Screen shape:
              "drill": str|None}]}
 """
 
-import asyncio
-import json
-import ssl
 import time
 from urllib.parse import quote
 
-import httpx
-import websockets
-
+import backends
 import config
+from backends import api_get, duration as _dur, format_bytes as _bytes, pct as _pct
 
 
 def _row(label: str, value: str = "", state: str = "ok", drill: str | None = None,
@@ -42,89 +38,22 @@ def _screen(title: str, rows: list, path: str = "", parent: str | None = None,
     return {"title": title, "path": path, "parent": parent, "layout": layout, "rows": rows}
 
 
-def _pct(used: float, total: float) -> int:
-    if not total:
-        return 0
-    return max(0, min(100, round(used / total * 100)))
+async def _pve_get(cfg: config.Config, sub: str):
+    return await api_get(f"{backends.pve_base(cfg.pve_host)}/{sub}",
+                         backends.pve_headers(cfg.pve_token_id, cfg.pve_secret),
+                         cfg.http_timeout)
 
 
-def _bytes(n) -> str:
-    n = float(n or 0)
-    for u in ("B", "K", "M", "G", "T"):
-        if n < 1024 or u == "T":
-            return f"{n:.0f}{u}" if u in ("B", "K", "M") else f"{n:.1f}{u}"
-        n /= 1024
-    return f"{n:.1f}T"
+async def _pbs_get(cfg: config.Config, sub: str):
+    return await api_get(f"{backends.pbs_base(cfg.pbs_host)}/{sub}",
+                         backends.pbs_headers(cfg.pbs_token_id, cfg.pbs_secret),
+                         cfg.http_timeout)
 
 
-# --- PVE helpers ------------------------------------------------------------
-
-async def _pve_get(client: httpx.AsyncClient, cfg: config.Config, sub: str):
-    base = f"https://{cfg.pve_host}/api2/json"
-    headers = {"Authorization": f"PVEAPIToken={cfg.pve_token_id}={cfg.pve_secret}"}
-    r = await client.get(f"{base}/{sub}", headers=headers, timeout=cfg.http_timeout)
-    r.raise_for_status()
-    return r.json().get("data")
-
-
-async def _pbs_get(client: httpx.AsyncClient, cfg: config.Config, sub: str):
-    base = f"https://{cfg.pbs_host}/api2/json"
-    headers = {"Authorization": f"PBSAPIToken={cfg.pbs_token_id}:{cfg.pbs_secret}"}  # colon, not =
-    r = await client.get(f"{base}/{sub}", headers=headers, timeout=cfg.http_timeout)
-    r.raise_for_status()
-    return r.json().get("data")
-
-
-# --- TrueNAS helper (JSON-RPC over WebSocket, mirrors app.fetch_truenas) -----
-
-async def _tn_call(cfg: config.Config, method: str, params=None):
-    uri = f"wss://{cfg.truenas_host}/api/current"
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    async with asyncio.timeout(cfg.http_timeout * 2):
-        async with websockets.connect(uri, ssl=ctx) as ws:
-            rid = 0
-
-            async def call(m, p=None):
-                nonlocal rid
-                rid += 1
-                mid = rid
-                await ws.send(json.dumps({"jsonrpc": "2.0", "id": mid, "method": m, "params": p or []}))
-                while True:
-                    msg = json.loads(await ws.recv())
-                    if msg.get("id") != mid:
-                        continue
-                    if "error" in msg:
-                        raise RuntimeError(msg["error"])
-                    return msg.get("result")
-
-            if not await call("auth.login_with_api_key", [cfg.truenas_key]):
-                raise RuntimeError("auth failed")
-            return await call(method, params)
-
-
-# --- UniFi helper (Integration API, X-API-KEY) -------------------------------
-
-async def _unifi_get(client: httpx.AsyncClient, cfg: config.Config, sub: str):
-    base = f"https://{cfg.unifi_host}/proxy/network/integration/v1"
-    headers = {"X-API-KEY": cfg.unifi_key, "Accept": "application/json"}
-    r = await client.get(f"{base}/{sub}", headers=headers, timeout=cfg.http_timeout)
-    r.raise_for_status()
-    body = r.json()
-    # Integration API wraps lists in {"data": [...]}; pass dicts through as-is.
-    if isinstance(body, dict) and "data" in body:
-        return body["data"]
-    return body
-
-
-async def _unifi_site_id(client: httpx.AsyncClient, cfg: config.Config) -> str:
-    sites = await _unifi_get(client, cfg, "sites") or []
-    if cfg.unifi_site and cfg.unifi_site != "default":
-        for s in sites:
-            if s.get("name") == cfg.unifi_site or s.get("id") == cfg.unifi_site:
-                return s["id"]
-    return sites[0]["id"] if sites else cfg.unifi_site
+async def _unifi_get(cfg: config.Config, sub: str):
+    return await api_get(f"{backends.unifi_base(cfg.unifi_host)}/{sub}",
+                         backends.unifi_headers(cfg.unifi_key),
+                         cfg.http_timeout)
 
 
 # --- entry point ------------------------------------------------------------
@@ -133,21 +62,20 @@ async def screen(path: str) -> dict:
     cfg = config.get()
     path = (path or "").strip("/")
     try:
-        async with httpx.AsyncClient(verify=False) as client:
-            if path == "":
-                return _home()
-            parts = path.split("/")
-            if parts[0] == "pve":
-                return await _pve(client, cfg, parts[1:], path)
-            if parts[0] == "truenas":
-                return await _truenas(cfg, parts[1:], path)
-            if parts[0] == "pbs":
-                return await _pbs(client, cfg, parts[1:], path)
-            if parts[0] == "unifi":
-                return await _unifi(client, cfg, parts[1:], path)
-            # other providers land here later (plex)
-            return _screen(parts[0].upper(), [_row("Not implemented yet", state="muted")],
-                           path, parent="")
+        if path == "":
+            return _home()
+        parts = path.split("/")
+        if parts[0] == "pve":
+            return await _pve(cfg, parts[1:], path)
+        if parts[0] == "truenas":
+            return await _truenas(cfg, parts[1:], path)
+        if parts[0] == "pbs":
+            return await _pbs(cfg, parts[1:], path)
+        if parts[0] == "unifi":
+            return await _unifi(cfg, parts[1:], path)
+        # other providers land here later (plex)
+        return _screen(parts[0].upper(), [_row("Not implemented yet", state="muted")],
+                       path, parent="")
     except Exception as e:
         return _screen("Error", [_row(type(e).__name__, str(e)[:40], "crit")], path, parent="")
 
@@ -163,13 +91,13 @@ def _home() -> dict:
 
 # --- PVE provider -----------------------------------------------------------
 
-async def _pve(client, cfg, sub, path) -> dict:
+async def _pve(cfg, sub, path) -> dict:
     if not (cfg.pve_host and cfg.pve_token_id and cfg.pve_secret):
         return _screen("CLUSTER", [_row("PVE not configured", state="crit")], path, parent="")
 
     # cluster: list nodes
     if not sub or sub[0] == "cluster":
-        nodes = await _pve_get(client, cfg, "cluster/resources?type=node") or []
+        nodes = await _pve_get(cfg, "cluster/resources?type=node") or []
         rows = []
         for n in sorted(nodes, key=lambda x: x.get("node", "")):
             up = n.get("status") == "online"
@@ -185,7 +113,7 @@ async def _pve(client, cfg, sub, path) -> dict:
     # node: its VMs/LXCs as gauge cards
     if sub[0] == "node" and len(sub) >= 2:
         node = sub[1]
-        guests = await _pve_get(client, cfg, "cluster/resources?type=vm") or []
+        guests = await _pve_get(cfg, "cluster/resources?type=vm") or []
         here = sorted([g for g in guests if g.get("node") == node],
                       key=lambda x: x.get("vmid", 0))
         rows = []
@@ -206,7 +134,7 @@ async def _pve(client, cfg, sub, path) -> dict:
     # guest: VM/LXC detail
     if sub[0] == "guest" and len(sub) >= 2:
         vmid = sub[1]
-        guests = await _pve_get(client, cfg, "cluster/resources?type=vm") or []
+        guests = await _pve_get(cfg, "cluster/resources?type=vm") or []
         g = next((x for x in guests if str(x.get("vmid")) == str(vmid)), None)
         if not g:
             return _screen(f"vm {vmid}", [_row("Not found", state="crit")], path, parent="pve/cluster")
@@ -236,7 +164,10 @@ async def _pve(client, cfg, sub, path) -> dict:
 async def _truenas(cfg: config.Config, sub, path) -> dict:
     if not (cfg.truenas_host and cfg.truenas_key):
         return _screen("POOLS", [_row("TrueNAS not configured", state="crit")], path, parent="")
-    pools = await _tn_call(cfg, "pool.query") or []
+    async with backends.truenas_session(
+        cfg.truenas_host, cfg.truenas_key, cfg.http_timeout
+    ) as rpc:
+        pools = await rpc.call("pool.query") or []
 
     # pools list -> single-ring cards (used %)
     if not sub or sub[0] == "pools":
@@ -297,10 +228,10 @@ async def _truenas(cfg: config.Config, sub, path) -> dict:
 
 # --- PBS provider -----------------------------------------------------------
 
-async def _pbs(client, cfg: config.Config, sub, path) -> dict:
+async def _pbs(cfg: config.Config, sub, path) -> dict:
     if not (cfg.pbs_host and cfg.pbs_token_id and cfg.pbs_secret):
         return _screen("BACKUPS", [_row("PBS not configured", state="crit")], path, parent="")
-    usage = await _pbs_get(client, cfg, "status/datastore-usage") or []
+    usage = await _pbs_get(cfg, "status/datastore-usage") or []
 
     # datastores list -> single-ring cards (used %)
     if not sub or sub[0] == "datastores":
@@ -333,8 +264,7 @@ async def _pbs(client, cfg: config.Config, sub, path) -> dict:
         # last GC (best-effort; needs Sys.Audit which the Audit role grants)
         try:
             tasks = await _pbs_get(
-                client, cfg,
-                f"nodes/{cfg.pbs_node}/tasks?store={q}&typefilter=garbage_collection&limit=1") or []
+                cfg, f"nodes/{cfg.pbs_node}/tasks?store={q}&typefilter=garbage_collection&limit=1") or []
             if tasks and tasks[0].get("endtime"):
                 days = (time.time() - tasks[0]["endtime"]) / 86400
                 ok = (tasks[0].get("status") or "OK") == "OK"
@@ -344,8 +274,7 @@ async def _pbs(client, cfg: config.Config, sub, path) -> dict:
         # last verify (best-effort)
         try:
             tasks = await _pbs_get(
-                client, cfg,
-                f"nodes/{cfg.pbs_node}/tasks?store={q}&typefilter=verify&limit=1") or []
+                cfg, f"nodes/{cfg.pbs_node}/tasks?store={q}&typefilter=verify&limit=1") or []
             if tasks and tasks[0].get("endtime"):
                 days = (time.time() - tasks[0]["endtime"]) / 86400
                 ok = (tasks[0].get("status") or "OK") == "OK"
@@ -354,7 +283,7 @@ async def _pbs(client, cfg: config.Config, sub, path) -> dict:
             pass
         # backup group count (best-effort)
         try:
-            groups = await _pbs_get(client, cfg, f"admin/datastore/{q}/groups") or []
+            groups = await _pbs_get(cfg, f"admin/datastore/{q}/groups") or []
             rows.append(_row("Backup Groups", str(len(groups)), "muted"))
         except Exception:
             pass
@@ -365,35 +294,30 @@ async def _pbs(client, cfg: config.Config, sub, path) -> dict:
 
 # --- UniFi provider ---------------------------------------------------------
 
-_GW_KEYWORDS = ("dream machine", "gateway", "uxg", "ucg", "udr", "udw", "udm")
-
-
 def _mbps(bps) -> str:
     m = float(bps or 0) * 8 / 1_000_000  # bytes/s -> Mbit/s
     return f"{m:.1f} Mbps" if m < 1000 else f"{m/1000:.2f} Gbps"
 
 
-async def _unifi(client, cfg: config.Config, sub, path) -> dict:
+async def _unifi(cfg: config.Config, sub, path) -> dict:
     if not (cfg.unifi_host and cfg.unifi_key):
         return _screen("NETWORK", [_row("UniFi not configured", state="crit")],
                        path, parent="", layout="list")
-    site = await _unifi_site_id(client, cfg)
-    devices = await _unifi_get(client, cfg, f"sites/{site}/devices") or []
+    site = await backends.unifi_site_id(
+        cfg.unifi_host, cfg.unifi_key, cfg.unifi_site, cfg.http_timeout)
+    devices = await _unifi_get(cfg, f"sites/{site}/devices") or []
 
     # root: gateway load + WAN throughput + client/device counts
     if not sub or sub[0] == "root":
-        gw = next((d for d in devices
-                   if any(k in (d.get("model", "") + d.get("name", "")).lower()
-                          for k in _GW_KEYWORDS)), devices[0] if devices else None)
+        gw = backends.pick_gateway(devices)
         st = {}
         if gw:
             try:
-                st = await _unifi_get(client, cfg,
-                                      f"sites/{site}/devices/{gw['id']}/statistics/latest") or {}
+                st = await _unifi_get(cfg, f"sites/{site}/devices/{gw['id']}/statistics/latest") or {}
             except Exception:
                 pass
         up = (st.get("uplink") or {})
-        clients = await _unifi_get(client, cfg, f"sites/{site}/clients") or []
+        clients = await _unifi_get(cfg, f"sites/{site}/clients") or []
         wired = sum(1 for c in clients if c.get("type") == "WIRED")
         online = sum(1 for d in devices if d.get("state") == "ONLINE")
         cpu = st.get("cpuUtilizationPct")
@@ -414,16 +338,3 @@ async def _unifi(client, cfg: config.Config, sub, path) -> dict:
         return _screen("NETWORK", rows, path, parent="", layout="list")
 
     return _screen("NETWORK", [_row("Unknown path", state="crit")], path, parent="")
-
-
-def _dur(sec: int) -> str:
-    if sec <= 0:
-        return "-"
-    d, sec = divmod(sec, 86400)
-    h, sec = divmod(sec, 3600)
-    m = sec // 60
-    if d:
-        return f"{d}d {h}h"
-    if h:
-        return f"{h}h {m}m"
-    return f"{m}m"

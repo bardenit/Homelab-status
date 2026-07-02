@@ -6,21 +6,18 @@ just mark a source false), these surface the real reason a backend call failed
 (401 vs 403 vs connection error) so the admin form can show actionable text.
 
 They test whatever values are passed in, which is how the UI tests unsaved,
-just-typed credentials rather than what is persisted.
+just-typed credentials rather than what is persisted. Each probe uses a fresh
+short-lived client on purpose: a Test should exercise a cold connection, not
+whatever the shared pool already has open.
 """
 
-import asyncio
-import json
-import ssl
-
 import httpx
-import websockets
 
-VERIFY_SSL = False  # self-signed certs are the norm on these boxes
+import backends
 
 
 async def _request(url: str, headers: dict, timeout: float) -> httpx.Response:
-    async with httpx.AsyncClient(verify=VERIFY_SSL) as client:
+    async with httpx.AsyncClient(verify=False) as client:
         return await client.get(url, headers=headers, timeout=timeout)
 
 
@@ -53,8 +50,8 @@ async def probe_pve(host: str, token_id: str, secret: str, timeout: float) -> di
         return {"ok": False, "status": None, "detail": miss}
     try:
         r = await _request(
-            f"https://{host}/api2/json/cluster/status",
-            {"Authorization": f"PVEAPIToken={token_id}={secret}"},
+            f"{backends.pve_base(host)}/cluster/status",
+            backends.pve_headers(token_id, secret),
             timeout,
         )
     except Exception as e:
@@ -75,51 +72,28 @@ async def probe_pve(host: str, token_id: str, secret: str, timeout: float) -> di
 
 
 async def probe_truenas(host: str, key: str, timeout: float) -> dict:
-    # TrueNAS uses JSON-RPC 2.0 over WebSocket (the REST API is deprecated in
-    # SCALE 25.04 and removed in 26). TLS is mandatory: keys sent over plain ws
-    # get revoked. This mirrors the handshake in app.fetch_truenas.
+    # JSON-RPC over WebSocket via backends.truenas_session (REST is deprecated
+    # in SCALE 25.04 and removed in 26; keys sent over plain ws get revoked).
     miss = _need(host=host, key=key)
     if miss:
         return {"ok": False, "status": None, "detail": miss}
-    uri = f"wss://{host}/api/current"
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
     try:
-        async with asyncio.timeout(timeout * 2):
-            async with websockets.connect(uri, ssl=ssl_ctx) as ws:
-                rid = 0
-
-                async def call(method, params=None):
-                    nonlocal rid
-                    rid += 1
-                    my_id = rid
-                    await ws.send(json.dumps({
-                        "jsonrpc": "2.0", "id": my_id, "method": method, "params": params or [],
-                    }))
-                    while True:
-                        msg = json.loads(await ws.recv())
-                        if msg.get("id") != my_id:
-                            continue
-                        if "error" in msg:
-                            raise RuntimeError(msg["error"])
-                        return msg.get("result")
-
-                if not await call("auth.login_with_api_key", [key]):
-                    return {
-                        "ok": False,
-                        "status": 403,
-                        "detail": "API key rejected. Check the key, and that its user has the Readonly Admin (or higher) role.",
-                    }
-                try:
-                    pools = await call("pool.query")
-                except RuntimeError as e:
-                    return {
-                        "ok": False,
-                        "status": 403,
-                        "detail": f"Authenticated, but pool.query was denied: {e}. The key's user needs read access to pools.",
-                    }
-                return {"ok": True, "status": 200, "detail": f"Connected — {len(pools)} pool(s)."}
+        async with backends.truenas_session(host, key, timeout) as rpc:
+            try:
+                pools = await rpc.call("pool.query")
+            except RuntimeError as e:
+                return {
+                    "ok": False,
+                    "status": 403,
+                    "detail": f"Authenticated, but pool.query was denied: {e}. The key's user needs read access to pools.",
+                }
+            return {"ok": True, "status": 200, "detail": f"Connected — {len(pools)} pool(s)."}
+    except backends.TrueNasAuthError:
+        return {
+            "ok": False,
+            "status": 403,
+            "detail": "API key rejected. Check the key, and that its user has the Readonly Admin (or higher) role.",
+        }
     except Exception as e:
         return _conn_error(e)
 
@@ -131,10 +105,9 @@ async def probe_unifi(host: str, key: str, site: str, timeout: float) -> dict:
         return {"ok": False, "status": None, "detail": miss}
     # The Integration API uses opaque site IDs from GET /sites (not the legacy
     # "default" slug), so validate the key against /sites, which needs no site.
-    base = f"https://{host}/proxy/network/integration/v1"
-    headers = {"X-API-KEY": key, "Accept": "application/json"}
     try:
-        r = await _request(f"{base}/sites", headers, timeout)
+        r = await _request(f"{backends.unifi_base(host)}/sites",
+                           backends.unifi_headers(key), timeout)
     except Exception as e:
         return _conn_error(e)
     if r.status_code == 401:
@@ -158,8 +131,8 @@ async def probe_pbs(host: str, token_id: str, secret: str, timeout: float) -> di
         return {"ok": False, "status": None, "detail": miss}
     try:
         r = await _request(
-            f"https://{host}/api2/json/status/datastore-usage",
-            {"Authorization": f"PBSAPIToken={token_id}:{secret}"},
+            f"{backends.pbs_base(host)}/status/datastore-usage",
+            backends.pbs_headers(token_id, secret),
             timeout,
         )
     except Exception as e:
