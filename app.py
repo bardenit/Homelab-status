@@ -111,8 +111,7 @@ class _RpcConn:
             return msg.get("result")
 
 
-async def fetch_truenas(client: httpx.AsyncClient, cfg: config.Config) -> dict:
-    # client (httpx) is unused here: TrueNAS speaks JSON-RPC over websocket now.
+async def fetch_truenas(cfg: config.Config) -> dict:
     out: dict = {"pools": [], "err": False}
     if not (cfg.truenas_host and cfg.truenas_key):
         out["err"] = True
@@ -381,7 +380,7 @@ async def build_payload() -> dict:
     # without dragging the heavy PVE/TrueNAS/PBS sweep along.
     async with httpx.AsyncClient(verify=False) as client:
         pve, tn, pbs = await asyncio.gather(
-            fetch_pve(client, cfg), fetch_truenas(client, cfg), fetch_pbs(client, cfg)
+            fetch_pve(client, cfg), fetch_truenas(cfg), fetch_pbs(client, cfg)
         )
 
     payload = {
@@ -430,6 +429,18 @@ app.add_middleware(
 from admin import router as admin_router  # noqa: E402  (after app/config are ready)
 
 app.include_router(admin_router)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    if request.url.path.startswith("/admin"):
+        # never let a browser or proxy cache admin pages (config forms, etc.)
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 
 @app.get("/api/status")

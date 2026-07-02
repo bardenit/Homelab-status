@@ -6,6 +6,7 @@ sent to /admin/setup to create one. /api/status and /healthz stay public so
 the CYD, which cannot log in, can still poll.
 """
 
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -96,6 +97,7 @@ async def login_submit(request: Request):
     if config.verify_password(form.get("password", ""), cfg.admin_password_hash):
         request.session["auth"] = True
         return RedirectResponse("/admin", status_code=SEE_OTHER)
+    await asyncio.sleep(1.0)  # blunt brute-force attempts
     return templates.TemplateResponse(
         request,
         "login.html",
@@ -121,16 +123,18 @@ async def save_config(request: Request):
     cfg.mock = form.get("mock") is not None
     cfg.pve_host = form.get("pve_host", "").strip()
     cfg.pve_token_id = form.get("pve_token_id", "").strip()
-    cfg.pve_secret = form.get("pve_secret", "").strip()
     cfg.truenas_host = form.get("truenas_host", "").strip()
-    cfg.truenas_key = form.get("truenas_key", "").strip()
     cfg.pbs_host = form.get("pbs_host", "").strip()
     cfg.pbs_token_id = form.get("pbs_token_id", "").strip()
-    cfg.pbs_secret = form.get("pbs_secret", "").strip()
     cfg.pbs_node = form.get("pbs_node", "").strip() or "localhost"
     cfg.unifi_host = form.get("unifi_host", "").strip()
-    cfg.unifi_key = form.get("unifi_key", "").strip()
     cfg.unifi_site = form.get("unifi_site", "").strip() or "default"
+    # Secrets are never rendered back into the form; an empty submit means
+    # "keep the saved value" so viewing/saving the page cannot leak or wipe them.
+    for field in ("pve_secret", "truenas_key", "pbs_secret", "unifi_key"):
+        value = (form.get(field) or "").strip()
+        if value:
+            setattr(cfg, field, value)
     cfg.mem_warn = _num(form.get("mem_warn"), cfg.mem_warn)
     cfg.pool_warn = _num(form.get("pool_warn"), cfg.pool_warn)
     cfg.pbs_warn = _num(form.get("pbs_warn"), cfg.pbs_warn)
@@ -143,18 +147,22 @@ async def save_config(request: Request):
     return RedirectResponse("/admin?saved=1", status_code=SEE_OTHER)
 
 
-# --- connection tests (probe the just-typed values, not saved creds) --------
+# --- connection tests (probe the just-typed values; a blank secret falls
+# back to the saved one, since secrets are never echoed into the form) -------
+
+def _form_val(f, key: str, saved: str = "") -> str:
+    return (f.get(key) or "").strip() or saved
+
 
 @router.post("/test/pve")
 async def test_pve(request: Request):
     if not _logged_in(request):
         return JSONResponse({"ok": False, "detail": "Not authenticated."}, status_code=401)
     f = await request.form()
+    cfg = config.get()
     result = await probe.probe_pve(
-        (f.get("pve_host") or "").strip(),
-        (f.get("pve_token_id") or "").strip(),
-        (f.get("pve_secret") or "").strip(),
-        config.get().http_timeout,
+        _form_val(f, "pve_host"), _form_val(f, "pve_token_id"),
+        _form_val(f, "pve_secret", cfg.pve_secret), cfg.http_timeout,
     )
     return JSONResponse(result)
 
@@ -164,10 +172,10 @@ async def test_truenas(request: Request):
     if not _logged_in(request):
         return JSONResponse({"ok": False, "detail": "Not authenticated."}, status_code=401)
     f = await request.form()
+    cfg = config.get()
     result = await probe.probe_truenas(
-        (f.get("truenas_host") or "").strip(),
-        (f.get("truenas_key") or "").strip(),
-        config.get().http_timeout,
+        _form_val(f, "truenas_host"),
+        _form_val(f, "truenas_key", cfg.truenas_key), cfg.http_timeout,
     )
     return JSONResponse(result)
 
@@ -177,11 +185,10 @@ async def test_pbs(request: Request):
     if not _logged_in(request):
         return JSONResponse({"ok": False, "detail": "Not authenticated."}, status_code=401)
     f = await request.form()
+    cfg = config.get()
     result = await probe.probe_pbs(
-        (f.get("pbs_host") or "").strip(),
-        (f.get("pbs_token_id") or "").strip(),
-        (f.get("pbs_secret") or "").strip(),
-        config.get().http_timeout,
+        _form_val(f, "pbs_host"), _form_val(f, "pbs_token_id"),
+        _form_val(f, "pbs_secret", cfg.pbs_secret), cfg.http_timeout,
     )
     return JSONResponse(result)
 
@@ -191,11 +198,11 @@ async def test_unifi(request: Request):
     if not _logged_in(request):
         return JSONResponse({"ok": False, "detail": "Not authenticated."}, status_code=401)
     f = await request.form()
+    cfg = config.get()
     result = await probe.probe_unifi(
-        (f.get("unifi_host") or "").strip(),
-        (f.get("unifi_key") or "").strip(),
-        (f.get("unifi_site") or "").strip() or "default",
-        config.get().http_timeout,
+        _form_val(f, "unifi_host"),
+        _form_val(f, "unifi_key", cfg.unifi_key),
+        _form_val(f, "unifi_site", "default"), cfg.http_timeout,
     )
     return JSONResponse(result)
 

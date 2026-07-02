@@ -10,7 +10,16 @@ services:
       - "80:8000"
     volumes:
       # persists /data/config.json (hosts, tokens, admin password) across recreation
+      # NOTE: the app runs as uid 1000; once on the host run: chown -R 1000:1000 ./data
       - ./data:/data
+    # hardening: no privilege escalation, no capabilities, immutable rootfs
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
       interval: 30s

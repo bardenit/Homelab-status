@@ -22,14 +22,16 @@
   <label for="pve_token_id">Token ID (e.g. jason@pam!LabMonitor)</label>
   <input type="text" id="pve_token_id" name="pve_token_id" value="{{ cfg.pve_token_id }}">
   <label for="pve_secret">Secret (the UUID)</label>
-  <input type="password" id="pve_secret" name="pve_secret" value="{{ cfg.pve_secret }}">
+  <input type="password" id="pve_secret" name="pve_secret" autocomplete="new-password"
+         placeholder="{% if cfg.pve_secret %}saved — leave blank to keep{% endif %}">
   <div><button type="button" class="secondary test-btn" data-target="pve">Test connection</button><span class="test-result" id="result-pve"></span></div>
 
   <h2>TrueNAS</h2>
   <label for="truenas_host">Host (e.g. 10.0.0.20)</label>
   <input type="text" id="truenas_host" name="truenas_host" value="{{ cfg.truenas_host }}">
   <label for="truenas_key">API key</label>
-  <input type="password" id="truenas_key" name="truenas_key" value="{{ cfg.truenas_key }}">
+  <input type="password" id="truenas_key" name="truenas_key" autocomplete="new-password"
+         placeholder="{% if cfg.truenas_key %}saved — leave blank to keep{% endif %}">
   <div><button type="button" class="secondary test-btn" data-target="truenas">Test connection</button><span class="test-result" id="result-truenas"></span></div>
 
   <h2>Proxmox Backup Server</h2>
@@ -38,7 +40,8 @@
   <label for="pbs_token_id">Token ID (e.g. backup@pbs!monitor)</label>
   <input type="text" id="pbs_token_id" name="pbs_token_id" value="{{ cfg.pbs_token_id }}">
   <label for="pbs_secret">Secret</label>
-  <input type="password" id="pbs_secret" name="pbs_secret" value="{{ cfg.pbs_secret }}">
+  <input type="password" id="pbs_secret" name="pbs_secret" autocomplete="new-password"
+         placeholder="{% if cfg.pbs_secret %}saved — leave blank to keep{% endif %}">
   <label for="pbs_node">Node name (for the GC task-log path)</label>
   <input type="text" id="pbs_node" name="pbs_node" value="{{ cfg.pbs_node }}">
   <div><button type="button" class="secondary test-btn" data-target="pbs">Test connection</button><span class="test-result" id="result-pbs"></span></div>
@@ -47,7 +50,8 @@
   <label for="unifi_host">Host (UDM/console IP, e.g. 10.0.0.1)</label>
   <input type="text" id="unifi_host" name="unifi_host" value="{{ cfg.unifi_host }}">
   <label for="unifi_key">API Key (Settings, Control Plane, Integrations)</label>
-  <input type="password" id="unifi_key" name="unifi_key" value="{{ cfg.unifi_key }}">
+  <input type="password" id="unifi_key" name="unifi_key" autocomplete="new-password"
+         placeholder="{% if cfg.unifi_key %}saved — leave blank to keep{% endif %}">
   <label for="unifi_site">Site (usually "default")</label>
   <input type="text" id="unifi_site" name="unifi_site" value="{{ cfg.unifi_site }}">
   <div><button type="button" class="secondary test-btn" data-target="unifi">Test connection</button><span class="test-result" id="result-unifi"></span></div>
