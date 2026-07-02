@@ -124,6 +124,34 @@ async def probe_truenas(host: str, key: str, timeout: float) -> dict:
         return _conn_error(e)
 
 
+async def probe_unifi(host: str, key: str, site: str, timeout: float) -> dict:
+    # UniFi OS Integration API: X-API-KEY header, base /proxy/network/integration/v1.
+    miss = _need(host=host, key=key)
+    if miss:
+        return {"ok": False, "status": None, "detail": miss}
+    # The Integration API uses opaque site IDs from GET /sites (not the legacy
+    # "default" slug), so validate the key against /sites, which needs no site.
+    base = f"https://{host}/proxy/network/integration/v1"
+    headers = {"X-API-KEY": key, "Accept": "application/json"}
+    try:
+        r = await _request(f"{base}/sites", headers, timeout)
+    except Exception as e:
+        return _conn_error(e)
+    if r.status_code == 401:
+        return {"ok": False, "status": 401, "detail": "401 — API key rejected. Regenerate it in UniFi (Settings, Control Plane, Integrations)."}
+    if r.status_code == 404:
+        return {"ok": False, "status": 404, "detail": "404 — Integration API not found (needs Network app 10.1.84+)."}
+    if r.status_code != 200:
+        return {"ok": False, "status": r.status_code, "detail": _explain(r.status_code) + " (check host is the UDM console)."}
+    try:
+        body = r.json()
+        sites = body.get("data", body) if isinstance(body, dict) else body
+        names = ", ".join(str(s.get("name") or s.get("id")) for s in sites[:4])
+        return {"ok": True, "status": 200, "detail": f"Connected — {len(sites)} site(s): {names}"}
+    except Exception:
+        return {"ok": True, "status": 200, "detail": "Connected (HTTP 200)."}
+
+
 async def probe_pbs(host: str, token_id: str, secret: str, timeout: float) -> dict:
     miss = _need(host=host, token_id=token_id, secret=secret)
     if miss:

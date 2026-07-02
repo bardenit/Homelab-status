@@ -2,6 +2,25 @@
 
 Running notes; newest first. Pick up cold from the top.
 
+## 2026-07-02 (later) — UniFi
+
+- **UniFi integration.** UDM Pro SE, Integration API (X-API-KEY, base
+  `/proxy/network/integration/v1`, Network app 10.4.57). Config fields in the
+  admin UI (host/key/site) + a Test button. Site IDs are opaque (from GET /sites),
+  NOT the legacy "default" slug, so the provider auto-discovers the site + gateway.
+- **NETWORK glance page (4/4)**: dual live WAN sparklines (down cyan / up orange,
+  20 native bars each, auto-scaled, right-aligned newest) + a GW cpu/mem/clients/
+  devices footer. Tap drills to `/ui/unifi` (WAN, GW load, uptime, clients, devices).
+- **Fast lane**: `/api/unifi` endpoint the panel polls every **1s** (separate
+  `unifi_interval`), while `/api/status` stays 15s/10s and no longer touches UniFi.
+  Aggregator memoizes site+gateway IDs and refreshes device/client counts only
+  every 15s, so the 1s path is ~1 API call to the UDM (gateway statistics/latest),
+  with a 1s server cache deduping both panels. Confirmed the UDM returns genuinely
+  live per-second throughput (not just 20s heartbeats).
+- ESPHome gotcha: built-in `montserrat_14` has no arrow glyphs (Unicode arrows AND
+  FontAwesome symbols both render as blank boxes), so labels use "DOWN"/"UP" text.
+  Real arrows would need a custom font.
+
 ## 2026-07-02
 
 - **Drill-down for all three sources.** TrueNAS provider (pools -> pool detail:

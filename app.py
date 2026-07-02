@@ -220,6 +220,93 @@ async def fetch_pbs(client: httpx.AsyncClient, cfg: config.Config) -> dict:
     return out
 
 
+# --- source: UniFi ----------------------------------------------------------
+
+_UNIFI_GW_KEYWORDS = ("dream machine", "gateway", "uxg", "ucg", "udr", "udw", "udm")
+
+
+# Memoized IDs + slow-changing counts so the fast path is a single API call
+# (the gateway's statistics/latest). Site/gateway are re-resolved rarely; the
+# device/client counts refresh on a slower cadence than the live throughput.
+_unifi_ids: dict = {"site": None, "gw": None, "ts": 0.0}
+_unifi_counts: dict = {"clients": 0, "dev_online": 0, "dev_total": 0, "ts": 0.0}
+_unifi_fast_cache: dict = {"ts": 0.0, "data": None}
+
+UNIFI_FAST_TTL = 1.0     # dedupe concurrent panel polls
+UNIFI_ID_TTL = 300.0     # re-resolve site/gateway ids every 5 min
+UNIFI_COUNT_TTL = 15.0   # refresh device/client counts every 15s
+
+
+async def _unifi_uget(client, base, headers, timeout, sub):
+    r = await client.get(f"{base}/{sub}", headers=headers, timeout=timeout)
+    r.raise_for_status()
+    body = r.json()
+    return body["data"] if isinstance(body, dict) and "data" in body else body
+
+
+async def fetch_unifi_fast(cfg: config.Config) -> dict:
+    out: dict = {"wan_down": 0.0, "wan_up": 0.0, "cpu": 0, "mem": 0,
+                 "clients": _unifi_counts["clients"],
+                 "dev_online": _unifi_counts["dev_online"],
+                 "dev_total": _unifi_counts["dev_total"], "err": False}
+    if not (cfg.unifi_host and cfg.unifi_key):
+        out["err"] = True
+        return out
+    base = f"https://{cfg.unifi_host}/proxy/network/integration/v1"
+    headers = {"X-API-KEY": cfg.unifi_key, "Accept": "application/json"}
+    now = time.time()
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            # (re)resolve site + gateway id, and refresh counts, only when stale
+            if _unifi_ids["gw"] is None or (now - _unifi_ids["ts"]) > UNIFI_ID_TTL \
+                    or (now - _unifi_counts["ts"]) > UNIFI_COUNT_TTL:
+                sites = await _unifi_uget(client, base, headers, cfg.http_timeout, "sites") or []
+                site = sites[0]["id"] if sites else cfg.unifi_site
+                if cfg.unifi_site and cfg.unifi_site != "default":
+                    site = next((s["id"] for s in sites
+                                 if cfg.unifi_site in (s.get("name"), s.get("id"))), site)
+                devices = await _unifi_uget(client, base, headers, cfg.http_timeout,
+                                            f"sites/{site}/devices") or []
+                gw = next((d for d in devices
+                           if any(k in (d.get("model", "") + d.get("name", "")).lower()
+                                  for k in _UNIFI_GW_KEYWORDS)), devices[0] if devices else None)
+                _unifi_ids.update(site=site, gw=(gw or {}).get("id"), ts=now)
+                clients = await _unifi_uget(client, base, headers, cfg.http_timeout,
+                                            f"sites/{site}/clients") or []
+                _unifi_counts.update(clients=len(clients),
+                                     dev_online=sum(1 for d in devices if d.get("state") == "ONLINE"),
+                                     dev_total=len(devices), ts=now)
+                out.update(clients=_unifi_counts["clients"],
+                           dev_online=_unifi_counts["dev_online"],
+                           dev_total=_unifi_counts["dev_total"])
+
+            # the live call: gateway throughput + load (one request)
+            if _unifi_ids["gw"]:
+                st = await _unifi_uget(client, base, headers, cfg.http_timeout,
+                                       f"sites/{_unifi_ids['site']}/devices/{_unifi_ids['gw']}/statistics/latest") or {}
+                up = st.get("uplink") or {}
+                out["wan_down"] = round(float(up.get("rxRateBps", 0)) * 8 / 1_000_000, 1)
+                out["wan_up"] = round(float(up.get("txRateBps", 0)) * 8 / 1_000_000, 1)
+                out["cpu"] = round(st.get("cpuUtilizationPct") or 0)
+                out["mem"] = round(st.get("memoryUtilizationPct") or 0)
+    except Exception:
+        out["err"] = True
+        _unifi_ids["gw"] = None  # force re-resolve next time
+    return out
+
+
+async def get_unifi_cached() -> dict:
+    cfg = config.get()
+    if cfg.mock:
+        return mock_unifi()
+    now = time.time()
+    if _unifi_fast_cache["data"] is not None and (now - _unifi_fast_cache["ts"]) < UNIFI_FAST_TTL:
+        return _unifi_fast_cache["data"]
+    data = await fetch_unifi_fast(cfg)
+    _unifi_fast_cache.update(ts=now, data=data)
+    return data
+
+
 # --- mock -------------------------------------------------------------------
 
 def mock_payload() -> dict:
@@ -245,6 +332,14 @@ def mock_payload() -> dict:
         "sources": {"pve": True, "truenas": True, "pbs": True},
         "alert": True,
     }
+
+
+def mock_unifi() -> dict:
+    import random
+    return {"wan_down": round(random.uniform(20, 120), 1),
+            "wan_up": round(random.uniform(5, 40), 1),
+            "cpu": random.randint(15, 45), "mem": 60,
+            "clients": 25, "dev_online": 11, "dev_total": 12, "err": False}
 
 
 # --- assembly + cache -------------------------------------------------------
@@ -281,7 +376,9 @@ async def build_payload() -> dict:
     if cfg.mock:
         return mock_payload()
 
-    # one client, self-signed certs are the norm on these boxes
+    # one client, self-signed certs are the norm on these boxes. UniFi is NOT
+    # here: it has its own fast /api/unifi lane so the panel can poll it quickly
+    # without dragging the heavy PVE/TrueNAS/PBS sweep along.
     async with httpx.AsyncClient(verify=False) as client:
         pve, tn, pbs = await asyncio.gather(
             fetch_pve(client, cfg), fetch_truenas(client, cfg), fetch_pbs(client, cfg)
@@ -345,6 +442,12 @@ async def status(request: Request):
         ip = request.client.host if request.client else "?"
         firmware.record_checkin(panel_id, version, ip)
     return await get_cached()
+
+
+@app.get("/api/unifi")
+async def api_unifi():
+    # Fast lane: WAN throughput + gateway load, polled at ~1s by the panel.
+    return await get_unifi_cached()
 
 
 @app.get("/healthz")

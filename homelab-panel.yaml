@@ -16,7 +16,9 @@ substitutions:
   name: homelab-panel
   agg_url: "http://10.10.10.14/api/status"   # production aggregator on the LXC
   ui_base: "http://10.10.10.14/ui/"          # drill-down browse screens
+  unifi_url: "http://10.10.10.14/api/unifi"  # fast lane: WAN throughput + gw load
   poll_interval: "15s"
+  unifi_interval: "1s"
   fw_version: "2026.07.01-2"
 
 esphome:
@@ -164,6 +166,13 @@ globals:
     restore_value: no
   - id: g_pbs_drill
     type: std::vector<std::string>
+    restore_value: no
+  # rolling WAN throughput history (Mbps) for the NETWORK sparklines
+  - id: g_dn_hist
+    type: std::vector<float>
+    restore_value: no
+  - id: g_up_hist
+    type: std::vector<float>
     restore_value: no
 
 # --- two SPI buses: display and touch are separate on this board ------------
@@ -327,6 +336,8 @@ touchscreen:
                   int col = (tx < 160) ? 0 : 1;
                   int idx = (ty < 131 ? 0 : 1) * 2 + col;
                   if (idx >= 0 && idx < (int) id(g_pbs_drill).size()) dp = id(g_pbs_drill)[idx];
+                } else if (scr == id(page_network)->obj && ty >= 28) {
+                  dp = "unifi";   // whole NETWORK page drills to the unifi detail
                 }
                 if (!dp.empty()) {
                   id(g_cur_path) = dp;
@@ -388,8 +399,8 @@ script:
           uint32_t mut  = dk ? 0x808080 : 0x909090;
           uint32_t surf = dk ? 0x1b212b : 0xEEF1F5;   // card surface
           uint32_t trk  = dk ? 0x2a2f3a : 0xD5DBE2;   // gauge track
-          lv_obj_t* pgs[5] = { id(page_cluster)->obj, id(page_pools)->obj, id(page_pbs)->obj, id(page_diag)->obj, id(page_browse)->obj };
-          for (int i = 0; i < 5; i++) {
+          lv_obj_t* pgs[6] = { id(page_cluster)->obj, id(page_pools)->obj, id(page_pbs)->obj, id(page_diag)->obj, id(page_browse)->obj, id(page_network)->obj };
+          for (int i = 0; i < 6; i++) {
             lv_obj_set_style_bg_color(pgs[i], lv_color_hex(bg), 0);
             lv_obj_set_style_bg_opa(pgs[i], LV_OPA_COVER, 0);
           }
@@ -428,7 +439,7 @@ script:
             lv_obj_set_style_arc_width(thick[i], 6, LV_PART_INDICATOR);
           }
           lv_obj_t* fgl[] = {
-            id(t_cluster), id(t_pools), id(t_pbs), id(t_diag),
+            id(t_cluster), id(t_pools), id(t_pbs), id(t_diag), id(t_net),
             id(cl0), id(cl1), id(cl2), id(cl3), id(cl4),
             id(p0l), id(p1l), id(p2l), id(p3l),
             id(p0v), id(p1v), id(p2v), id(p3v),
@@ -443,7 +454,7 @@ script:
           for (unsigned i = 0; i < sizeof(fgl)/sizeof(fgl[0]); i++)
             lv_obj_set_style_text_color(fgl[i], lv_color_hex(fg), 0);
           lv_obj_t* mtl[] = {
-            id(pg1), id(pg2), id(pg3), id(pg_diag), id(d_rst),
+            id(pg1), id(pg2), id(pg3), id(pg4), id(pg_diag), id(d_rst), id(net_foot),
             id(p0h), id(p1h), id(p2h), id(p3h),
             id(b0g), id(b1g), id(b2g), id(b3g),
             id(cv0), id(cv1), id(cv2), id(cv3), id(cv4),
@@ -577,7 +588,7 @@ lvgl:
     - id: page_cluster
       widgets:
         - label: { id: t_cluster, x: 8, y: 6, text: "CLUSTER", text_color: 0xF0F0F0, text_font: montserrat_16 }
-        - label: { id: pg1, x: 286, y: 8, text: "1/3", text_color: 0x808080 }
+        - label: { id: pg1, x: 286, y: 8, text: "1/4", text_color: 0x808080 }
         # 5 node cards: 3 across the top, 2 on the bottom. Each has concentric
         # rings: CPU outer (cyan), MEM inner (orange), values in the footer.
         - obj:
@@ -659,7 +670,7 @@ lvgl:
     - id: page_pools
       widgets:
         - label: { id: t_pools, x: 8, y: 6, text: "POOLS", text_color: 0xF0F0F0, text_font: montserrat_16 }
-        - label: { id: pg2, x: 286, y: 8, text: "2/3", text_color: 0x808080 }
+        - label: { id: pg2, x: 286, y: 8, text: "2/4", text_color: 0x808080 }
         - obj:
             id: pc0
             x: 6
@@ -724,7 +735,7 @@ lvgl:
     - id: page_pbs
       widgets:
         - label: { id: t_pbs, x: 8, y: 6, text: "BACKUPS", text_color: 0xF0F0F0, text_font: montserrat_16 }
-        - label: { id: pg3, x: 286, y: 8, text: "3/3", text_color: 0x808080 }
+        - label: { id: pg3, x: 286, y: 8, text: "3/4", text_color: 0x808080 }
         - obj:
             id: bc0
             x: 6
@@ -785,6 +796,76 @@ lvgl:
               - arc: { id: b3a, align: CENTER, y: 8, width: 66, height: 66, min_value: 0, max_value: 100, value: 0, adjustable: false, arc_width: 6, arc_color: 0x2a2f3a, indicator: { arc_color: 0x33CCFF }, knob: { bg_opa: TRANSP } }
               - label: { id: b3v, align: CENTER, y: 8, text: "", text_color: 0xF0F0F0, text_font: montserrat_16 }
               - label: { id: b3g, align: BOTTOM_MID, y: -4, text: "", text_color: 0x808080, text_font: montserrat_12 }
+    # --- page 4: unifi network (WAN sparklines + gateway stats) ---
+    - id: page_network
+      widgets:
+        - label: { id: t_net, x: 8,   y: 6, text: "NETWORK", text_color: 0xF0F0F0, text_font: montserrat_16 }
+        - label: { id: pg4,   x: 286, y: 8, text: "4/4",     text_color: 0x808080 }
+        - label: { id: net_dn, x: 8, y: 32, text: "", text_color: 0x33CCFF, text_font: montserrat_14 }
+        - obj:
+            id: dn_spark
+            x: 8
+            y: 52
+            width: 304
+            height: 58
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            layout: { type: flex, flex_flow: ROW, flex_align_main: SPACE_BETWEEN, flex_align_cross: END }
+            widgets:
+              - obj: { id: dn0, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn1, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn2, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn3, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn4, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn5, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn6, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn7, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn8, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn9, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn10, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn11, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn12, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn13, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn14, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn15, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn16, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn17, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn18, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+              - obj: { id: dn19, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0x33CCFF }
+        - label: { id: net_up, x: 8, y: 114, text: "", text_color: 0xFF9F40, text_font: montserrat_14 }
+        - obj:
+            id: up_spark
+            x: 8
+            y: 134
+            width: 304
+            height: 58
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            layout: { type: flex, flex_flow: ROW, flex_align_main: SPACE_BETWEEN, flex_align_cross: END }
+            widgets:
+              - obj: { id: up0, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up1, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up2, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up3, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up4, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up5, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up6, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up7, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up8, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up9, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up10, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up11, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up12, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up13, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up14, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up15, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up16, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up17, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up18, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+              - obj: { id: up19, width: 12, height: 3, radius: 1, border_width: 0, pad_all: 0, bg_color: 0xFF9F40 }
+        - label: { id: net_foot, x: 8, y: 196, text: "", text_color: 0x808080, text_font: montserrat_12 }
     # --- diagnostics (skipped by swipe/auto-cycle; double-tap to toggle) ---
     - id: page_diag
       skip: true
@@ -1195,6 +1276,56 @@ interval:
           then:
             - lambda: 'id(g_diag) = false;'
             - lvgl.page.next:
+
+  # fast lane: poll the UniFi WAN throughput + gateway load and drive the
+  # NETWORK page (sparklines + stats). Separate from the 15s full poll so this
+  # can run quickly without dragging the heavy PVE/TrueNAS/PBS sweep along.
+  - interval: ${unifi_interval}
+    then:
+      - http_request.get:
+          url: ${unifi_url}
+          capture_response: true
+          max_response_buffer_size: 2kB
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) return;
+                  json::parse_json(body, [](JsonObjectConst uni) -> bool {
+                    char buf[48];
+                    float dn = uni["wan_down"] | 0.0f;
+                    float up = uni["wan_up"] | 0.0f;
+                    if (id(g_dn_hist).size() >= 20) id(g_dn_hist).erase(id(g_dn_hist).begin());
+                    if (id(g_up_hist).size() >= 20) id(g_up_hist).erase(id(g_up_hist).begin());
+                    id(g_dn_hist).push_back(dn);
+                    id(g_up_hist).push_back(up);
+
+                    snprintf(buf, sizeof(buf), "DOWN  %.1f Mbps", dn);
+                    lv_label_set_text(id(net_dn), buf);
+                    snprintf(buf, sizeof(buf), "UP  %.1f Mbps", up);
+                    lv_label_set_text(id(net_up), buf);
+                    int ucpu = uni["cpu"] | 0, umem = uni["mem"] | 0;
+                    int ucli = uni["clients"] | 0, udon = uni["dev_online"] | 0, udtot = uni["dev_total"] | 0;
+                    snprintf(buf, sizeof(buf), "GW %d%% cpu  %d%% mem   %d cli   %d/%d dev", ucpu, umem, ucli, udon, udtot);
+                    lv_label_set_text(id(net_foot), buf);
+
+                    lv_obj_t* dnb[20] = { id(dn0), id(dn1), id(dn2), id(dn3), id(dn4), id(dn5), id(dn6), id(dn7), id(dn8), id(dn9), id(dn10), id(dn11), id(dn12), id(dn13), id(dn14), id(dn15), id(dn16), id(dn17), id(dn18), id(dn19) };
+                    lv_obj_t* upb[20] = { id(up0), id(up1), id(up2), id(up3), id(up4), id(up5), id(up6), id(up7), id(up8), id(up9), id(up10), id(up11), id(up12), id(up13), id(up14), id(up15), id(up16), id(up17), id(up18), id(up19) };
+                    float dmax = 1.0f, umax = 1.0f;
+                    for (float v : id(g_dn_hist)) if (v > dmax) dmax = v;
+                    for (float v : id(g_up_hist)) if (v > umax) umax = v;
+                    int dn_n = id(g_dn_hist).size(), up_n = id(g_up_hist).size();
+                    for (int i = 0; i < 20; i++) {
+                      int di = i - (20 - dn_n);   // right-align: newest at rightmost bar
+                      int h = (di >= 0) ? (int)(id(g_dn_hist)[di] / dmax * 54.0f) : 0;
+                      if (h < 3) h = 3;
+                      lv_obj_set_height(dnb[i], h);
+                      int uix = i - (20 - up_n);
+                      int hu = (uix >= 0) ? (int)(id(g_up_hist)[uix] / umax * 54.0f) : 0;
+                      if (hu < 3) hu = 3;
+                      lv_obj_set_height(upb[i], hu);
+                    }
+                    return true;
+                  });
 
   # refresh the diagnostics page from wifi/system info every 2s
   - interval: 2s

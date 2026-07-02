@@ -62,6 +62,10 @@ class Config:
     pbs_token_id: str = ""
     pbs_secret: str = ""
     pbs_node: str = "localhost"
+    # UniFi (UDM/UniFi OS: Integration API key, X-API-KEY header; site "default")
+    unifi_host: str = ""
+    unifi_key: str = ""
+    unifi_site: str = "default"
     # alert thresholds (percent)
     mem_warn: float = 90
     pool_warn: float = 85
@@ -90,6 +94,9 @@ class Config:
             pbs_token_id=pbs_id,
             pbs_secret=pbs_secret,
             pbs_node=_env("PBS_NODE", "localhost"),
+            unifi_host=_env("UNIFI_HOST"),
+            unifi_key=_env("UNIFI_KEY"),
+            unifi_site=_env("UNIFI_SITE", "default"),
             mem_warn=_envf("MEM_WARN", 90),
             pool_warn=_envf("POOL_WARN", 85),
             pbs_warn=_envf("PBS_WARN", 85),

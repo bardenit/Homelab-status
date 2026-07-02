@@ -43,6 +43,15 @@
   <input type="text" id="pbs_node" name="pbs_node" value="{{ cfg.pbs_node }}">
   <div><button type="button" class="secondary test-btn" data-target="pbs">Test connection</button><span class="test-result" id="result-pbs"></span></div>
 
+  <h2>UniFi Network</h2>
+  <label for="unifi_host">Host (UDM/console IP, e.g. 10.0.0.1)</label>
+  <input type="text" id="unifi_host" name="unifi_host" value="{{ cfg.unifi_host }}">
+  <label for="unifi_key">API Key (Settings, Control Plane, Integrations)</label>
+  <input type="password" id="unifi_key" name="unifi_key" value="{{ cfg.unifi_key }}">
+  <label for="unifi_site">Site (usually "default")</label>
+  <input type="text" id="unifi_site" name="unifi_site" value="{{ cfg.unifi_site }}">
+  <div><button type="button" class="secondary test-btn" data-target="unifi">Test connection</button><span class="test-result" id="result-unifi"></span></div>
+
   <h2>Alert thresholds (%)</h2>
   <div class="row">
     <div><label for="mem_warn">Node memory</label><input type="number" step="1" id="mem_warn" name="mem_warn" value="{{ cfg.mem_warn }}"></div>
@@ -69,6 +78,7 @@
     pve:     ["pve_host", "pve_token_id", "pve_secret"],
     truenas: ["truenas_host", "truenas_key"],
     pbs:     ["pbs_host", "pbs_token_id", "pbs_secret", "pbs_node"],
+    unifi:   ["unifi_host", "unifi_key", "unifi_site"],
   };
   document.querySelectorAll(".test-btn").forEach(function (btn) {
     btn.addEventListener("click", async function () {

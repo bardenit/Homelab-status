@@ -104,6 +104,29 @@ async def _tn_call(cfg: config.Config, method: str, params=None):
             return await call(method, params)
 
 
+# --- UniFi helper (Integration API, X-API-KEY) -------------------------------
+
+async def _unifi_get(client: httpx.AsyncClient, cfg: config.Config, sub: str):
+    base = f"https://{cfg.unifi_host}/proxy/network/integration/v1"
+    headers = {"X-API-KEY": cfg.unifi_key, "Accept": "application/json"}
+    r = await client.get(f"{base}/{sub}", headers=headers, timeout=cfg.http_timeout)
+    r.raise_for_status()
+    body = r.json()
+    # Integration API wraps lists in {"data": [...]}; pass dicts through as-is.
+    if isinstance(body, dict) and "data" in body:
+        return body["data"]
+    return body
+
+
+async def _unifi_site_id(client: httpx.AsyncClient, cfg: config.Config) -> str:
+    sites = await _unifi_get(client, cfg, "sites") or []
+    if cfg.unifi_site and cfg.unifi_site != "default":
+        for s in sites:
+            if s.get("name") == cfg.unifi_site or s.get("id") == cfg.unifi_site:
+                return s["id"]
+    return sites[0]["id"] if sites else cfg.unifi_site
+
+
 # --- entry point ------------------------------------------------------------
 
 async def screen(path: str) -> dict:
@@ -120,7 +143,9 @@ async def screen(path: str) -> dict:
                 return await _truenas(cfg, parts[1:], path)
             if parts[0] == "pbs":
                 return await _pbs(client, cfg, parts[1:], path)
-            # other providers land here later (unifi, plex)
+            if parts[0] == "unifi":
+                return await _unifi(client, cfg, parts[1:], path)
+            # other providers land here later (plex)
             return _screen(parts[0].upper(), [_row("Not implemented yet", state="muted")],
                            path, parent="")
     except Exception as e:
@@ -132,6 +157,7 @@ def _home() -> dict:
         _row("Cluster", "PVE", "ok", "pve/cluster"),
         _row("Pools", "TrueNAS", "ok", "truenas/pools"),
         _row("Backups", "PBS", "ok", "pbs/datastores"),
+        _row("Network", "UniFi", "ok", "unifi"),
     ], path="")
 
 
@@ -335,6 +361,59 @@ async def _pbs(client, cfg: config.Config, sub, path) -> dict:
         return _screen(name, rows, path, parent="pbs/datastores", layout="list")
 
     return _screen("BACKUPS", [_row("Unknown path", state="crit")], path, parent="")
+
+
+# --- UniFi provider ---------------------------------------------------------
+
+_GW_KEYWORDS = ("dream machine", "gateway", "uxg", "ucg", "udr", "udw", "udm")
+
+
+def _mbps(bps) -> str:
+    m = float(bps or 0) * 8 / 1_000_000  # bytes/s -> Mbit/s
+    return f"{m:.1f} Mbps" if m < 1000 else f"{m/1000:.2f} Gbps"
+
+
+async def _unifi(client, cfg: config.Config, sub, path) -> dict:
+    if not (cfg.unifi_host and cfg.unifi_key):
+        return _screen("NETWORK", [_row("UniFi not configured", state="crit")],
+                       path, parent="", layout="list")
+    site = await _unifi_site_id(client, cfg)
+    devices = await _unifi_get(client, cfg, f"sites/{site}/devices") or []
+
+    # root: gateway load + WAN throughput + client/device counts
+    if not sub or sub[0] == "root":
+        gw = next((d for d in devices
+                   if any(k in (d.get("model", "") + d.get("name", "")).lower()
+                          for k in _GW_KEYWORDS)), devices[0] if devices else None)
+        st = {}
+        if gw:
+            try:
+                st = await _unifi_get(client, cfg,
+                                      f"sites/{site}/devices/{gw['id']}/statistics/latest") or {}
+            except Exception:
+                pass
+        up = (st.get("uplink") or {})
+        clients = await _unifi_get(client, cfg, f"sites/{site}/clients") or []
+        wired = sum(1 for c in clients if c.get("type") == "WIRED")
+        online = sum(1 for d in devices if d.get("state") == "ONLINE")
+        cpu = st.get("cpuUtilizationPct")
+        mem = st.get("memoryUtilizationPct")
+        rows = [
+            _row("WAN Down", _mbps(up.get("rxRateBps")), "ok"),
+            _row("WAN Up", _mbps(up.get("txRateBps")), "ok"),
+            _row("GW CPU", f"{cpu:.0f}%" if cpu is not None else "?",
+                 "warn" if (cpu or 0) >= 85 else "ok"),
+            _row("GW Mem", f"{mem:.0f}%" if mem is not None else "?",
+                 "warn" if (mem or 0) >= 85 else "ok"),
+            _row("Load", f"{st.get('loadAverage1Min', 0):.2f}", "muted"),
+            _row("Uptime", _dur(int(st.get("uptimeSec", 0))), "muted"),
+            _row("Clients", f"{len(clients)} ({wired}w / {len(clients)-wired}wl)", "muted"),
+            _row("Devices", f"{online}/{len(devices)} online",
+                 "ok" if online == len(devices) else "warn"),
+        ]
+        return _screen("NETWORK", rows, path, parent="", layout="list")
+
+    return _screen("NETWORK", [_row("Unknown path", state="crit")], path, parent="")
 
 
 def _dur(sec: int) -> str:

@@ -128,6 +128,9 @@ async def save_config(request: Request):
     cfg.pbs_token_id = form.get("pbs_token_id", "").strip()
     cfg.pbs_secret = form.get("pbs_secret", "").strip()
     cfg.pbs_node = form.get("pbs_node", "").strip() or "localhost"
+    cfg.unifi_host = form.get("unifi_host", "").strip()
+    cfg.unifi_key = form.get("unifi_key", "").strip()
+    cfg.unifi_site = form.get("unifi_site", "").strip() or "default"
     cfg.mem_warn = _num(form.get("mem_warn"), cfg.mem_warn)
     cfg.pool_warn = _num(form.get("pool_warn"), cfg.pool_warn)
     cfg.pbs_warn = _num(form.get("pbs_warn"), cfg.pbs_warn)
@@ -178,6 +181,20 @@ async def test_pbs(request: Request):
         (f.get("pbs_host") or "").strip(),
         (f.get("pbs_token_id") or "").strip(),
         (f.get("pbs_secret") or "").strip(),
+        config.get().http_timeout,
+    )
+    return JSONResponse(result)
+
+
+@router.post("/test/unifi")
+async def test_unifi(request: Request):
+    if not _logged_in(request):
+        return JSONResponse({"ok": False, "detail": "Not authenticated."}, status_code=401)
+    f = await request.form()
+    result = await probe.probe_unifi(
+        (f.get("unifi_host") or "").strip(),
+        (f.get("unifi_key") or "").strip(),
+        (f.get("unifi_site") or "").strip() or "default",
         config.get().http_timeout,
     )
     return JSONResponse(result)
