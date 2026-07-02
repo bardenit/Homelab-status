@@ -1,9 +1,9 @@
 # HANDOFF: cleanup + hardening pass ready to test
 
-Status: deployed to the LXC 2026-07-02 and server-side checks all passed live
-(healthz config:ok, all sources green, drill-downs, UniFi lane, admin gating).
-Remaining: eyeball the two panels and log into /admin once. No firmware
-change: the CYDs do not need a re-flash.
+Status: COMPLETE (2026-07-02). Deployed to the LXC, server-side checks all
+passed live (healthz config:ok, all sources green, drill-downs, UniFi lane,
+admin gating), and Jason confirmed admin login plus all four Test buttons
+green. Nothing pending. No firmware change: the CYDs did not need a re-flash.
 
 ## Deploy (on the LXC at 10.10.10.14)
 
