@@ -1,7 +1,9 @@
 # HANDOFF: cleanup + hardening pass ready to test
 
-Status: work complete, image pushed to Docker Hub (multi-arch), awaiting your
-redeploy and test. No firmware change: the CYDs do not need a re-flash.
+Status: deployed to the LXC 2026-07-02 and server-side checks all passed live
+(healthz config:ok, all sources green, drill-downs, UniFi lane, admin gating).
+Remaining: eyeball the two panels and log into /admin once. No firmware
+change: the CYDs do not need a re-flash.
 
 ## Deploy (on the LXC at 10.10.10.14)
 
